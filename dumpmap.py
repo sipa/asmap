@@ -19,7 +19,7 @@ def dumpmap(asmap, pos=0, num=0, bits=128):
         print("%s AS%i" % (num_to_addr_str(num, bits), int.from_bytes(asmap[pos:pos+2+opcode], 'little')))
     elif opcode >= 240:
         assert(len(asmap) >= pos + 2)
-        print("%s AS%i" % (num_to_addr_str(num, bits), int.from_bytes(asmap[pos:pos+2], 'big') + ((opcode - 240) << 16)))
+        print("%s AS%i" % (num_to_addr_str(num, bits), int.from_bytes(asmap[pos:pos+2], 'little') + ((opcode - 240) << 16)))
     elif opcode < 128:
         nbits = opcode.bit_length() - 1
         dumpmap(asmap, pos, (num << nbits) + (opcode & ((1 << nbits) - 1)), bits - nbits)

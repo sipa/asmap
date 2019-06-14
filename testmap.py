@@ -14,7 +14,7 @@ def interpret(asmap, num, bits):
             return int.from_bytes(asmap[pos:pos+2+opcode], 'little')
         elif opcode >= 240:
             assert(len(asmap) >= pos + 2)
-            return int.from_bytes(asmap[pos:pos+2], 'big') + ((opcode - 240) << 16)
+            return int.from_bytes(asmap[pos:pos+2], 'little') + ((opcode - 240) << 16)
         elif opcode < 128:
             nbits = opcode.bit_length() - 1
             assert(bits >= nbits)

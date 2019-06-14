@@ -37,9 +37,9 @@ def AddEntry(netmask, asn, fnam, linenum, entries):
         print("[WARNING] %s: loopback address %s for AS%i" % (loc, netmask, asn), file=sys.stderr)
         return
     if isinstance(network, ipaddress.IPv4Network):
-        entries.append((int.from_bytes(IPV4_PREFIX + network.network_address.packed, 'big'), network.prefixlen + 96, asn, "%s:%i" % (fnam, linenum)))
+        entries.append((IPV4_PREFIX + network.network_address.packed, "%s AS%i # %s:%i" % (network.compressed, asn, fnam, linenum)))
     elif isinstance(network, ipaddress.IPv6Network):
-        entries.append((int.from_bytes(network.network_address.packed, 'big'), network.prefixlen, asn, "%s:%i" % (fnam, linenum)))
+        entries.append((network.network_address.packed, "%s AS%i # %s:%i" % (network.compressed, asn, fnam, linenum)))
     else:
         raise AssertionError("Unknown network type for %s" % netmask)
 
@@ -101,5 +101,5 @@ for fnam in sys.argv[1:]:
     ParseDump(fnam, entries)
 print("[INFO] Parsed %i prefixes" % len(entries), file=sys.stderr)
 entries.sort()
-for val, prefixlen, asn, comment in entries:
-    print("%032x %i %i %s" % (val, prefixlen, asn, comment))
+for _, s in entries:
+    print(s)
