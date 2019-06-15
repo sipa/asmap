@@ -2,22 +2,14 @@ import sys
 import re
 import ipaddress
 
-MAX_ASN = 1000000
-
 IPV4_PREFIX = bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff])
 
 def AddEntry(netmask, asn, fnam, linenum, entries):
     loc = "%s:%i" % (fnam, linenum)
+    network = ipaddress.ip_network(netmask, True)
     if asn is None:
         print("[WARNING] %s: no ASN for %s" % (loc, netmask), file=sys.stderr)
         return
-    if asn == 0:
-        print("[WARNING] %s: ASN is zero for %s" % (loc, netmask), file=sys.stderr)
-        return
-    if asn >= MAX_ASN:
-        print("[WARNING] %s: %s has too large AS%i" % (loc, netmask, asn), file=sys.stderr)
-        return
-    network = ipaddress.ip_network(netmask, True)
     if not network:
         print("[WARNING] %s: cannot parse netmask %s for AS%i" % (loc, netmask, asn), file=sys.stderr)
         return
@@ -35,6 +27,18 @@ def AddEntry(netmask, asn, fnam, linenum, entries):
         return
     if network.is_loopback:
         print("[WARNING] %s: loopback address %s for AS%i" % (loc, netmask, asn), file=sys.stderr)
+        return
+    if asn == 0 or asn == 65535 or (asn >= 65552 and asn <= 131072) or asn == 4294967295:
+        print("[WARNING] %s: prefix %s has reserved AS%i (RFC1930)" % (loc, netmask, asn), file=sys.stderr)
+        return
+    if asn == 23456:
+        print("[WARNING] %s: prefix %s has transition AS%i (RFC6793)" % (loc, netmask, asn), file=sys.stderr)
+        return
+    if (asn >= 64496 and asn <= 64511) or (asn >= 65536 and asn <= 65551):
+        print("[WARNING] %s: prefix %s has documentation AS%i (RFC4893,RFC5398)" % (loc, netmask, asn), file=sys.stderr)
+        return
+    if (asn >= 64512 and asn <= 65534) or (asn >= 4200000000 and asn <= 4294967294):
+        print("[WARNING] %s: prefix %s has private AS%i (RFC5398,RFC6996)" % (loc, netmask, asn), file=sys.stderr)
         return
     if isinstance(network, ipaddress.IPv4Network):
         entries.append((IPV4_PREFIX + network.network_address.packed, "%s AS%i # %s:%i" % (network.compressed, asn, fnam, linenum)))
