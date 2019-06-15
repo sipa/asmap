@@ -35,6 +35,9 @@ def UpdateTree(gtree, addrlen, entries):
             assert(isinstance(tree[bit], int))
             if tree[bit] == asn:
                 break
+            if not needs_inner:
+                tree[bit] = asn
+                break
             default = tree[bit]
             tree[bit] = [default, default]
             tree = tree[bit]
