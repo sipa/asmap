@@ -107,6 +107,68 @@ def TreeSize(tree, default = None):
     right_as, right_inas, right_node, right_set = TreeSize(tree[1], default)
     return (left_as + right_as, this_as + left_inas + right_inas, left_node + right_node + 1, left_set | right_set | this_set)
 
+JUMP = 'ST_JUMP'
+MATCH = 'ST_MATCH'
+SET = 'ST_SET'
+END = 'ST_END'
+MLEN = 'MLEN'
+AS = 'AS'
+BIT = ('BITS',)
+JUMPBITS = 'JBITS'
+JUMPLEN = 'JLEN'
+
+def TreeTrans(tree, default, state):
+    # END: 0
+    # JUMP: 10
+    # MATCH: 110
+    # SET: 111
+    nbits = 0
+    assert(tree is not None)
+    assert(not (isinstance(tree, int) and tree == default))
+    while isinstance(tree, list):
+        if tree[0] is None or tree[0] == default:
+            nbits += 1
+            tree = tree[1]
+        elif tree[1] is None or tree[1] == default:
+            nbits += 1
+            tree = tree[0]
+        else:
+            break
+    if nbits:
+        ret = TreeTrans(tree, default, MATCH)
+        ret.setdefault((state, MATCH), 0)
+        ret[(state, MATCH)] += 1
+        ret.setdefault((MLEN, nbits), 0)
+        ret[(MLEN, nbits)] += 1
+        ret.setdefault(BIT, 0)
+        ret[BIT] += 2 * nbits + 3
+        return ret
+    if isinstance(tree, int):
+        return {(state, END): 1, (AS, tree > 0xFFFF): 1, BIT: 17 + (tree > 0xFFFF) * 4 + 1}
+    if len(tree) > 2 and tree[2] != default:
+        ret = TreeTrans(tree, tree[2], SET)
+        ret.setdefault((state, SET), 0)
+        ret[(state, SET)] += 1
+        ret.setdefault((AS, tree[2] > 0xFFFF), 0)
+        ret[(AS, tree[2] > 0xFFFF)] += 1
+        ret.setdefault(BIT, 0)
+        ret[BIT] += 17 + (tree[2] > 0xFFFF) * 4 + 3
+        return ret
+    left = TreeTrans(tree[0], default, JUMP)
+    right = TreeTrans(tree[1], default, JUMP)
+    ret = {k: left.get(k, 0) + right.get(k, 0) for k in set(left) | set(right)}
+    ret.setdefault((state, JUMP), 0)
+    ret[(state, JUMP)] += 1
+    if left[BIT] < 144:
+        ret.setdefault((JUMPLEN, left[BIT]), 0)
+        ret[(JUMPLEN, left[BIT])] += 1
+    else:
+        ret.setdefault((JUMPBITS, (left[BIT] - 18).bit_length()), 0)
+        ret[(JUMPBITS, (left[BIT] - 18).bit_length())] += 1
+    ret[BIT] += 2 + (left[BIT] - 18).bit_length() * 2 + 1
+    return ret
+
+
 def TreeSer(tree, default):
     # 0: 4-byte ASN ollows
     # 1: 4-byte default ASN follows
@@ -183,3 +245,6 @@ bs = TreeSer(tree, None)
 print("[INFO] Serialized trie is %i bytes" % len(bs), file=sys.stderr)
 print("[INFO] Writing trie to stdout", file=sys.stderr)
 sys.stdout.buffer.write(bs)
+c = TreeTrans(tree, None, JUMP)
+for k in sorted(c):
+    print("%r: % 8i" % (k, c[k]), file=sys.stderr)
