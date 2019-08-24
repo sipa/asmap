@@ -88,22 +88,6 @@ def PropTree(tree, approx=True):
         return ([tree[0], tree[1], maxasn], {maxasn: 1}, allnone)
     return (tree, allcnt, allnone)
 
-# Compute some statistics about the tree size.
-def TreeSize(tree, default = None):
-    if tree is None or tree == default:
-        return (0, 0, 0, set())
-    if isinstance(tree, int):
-        return (1, 0, 0, set([tree]))
-    this_as = 0
-    this_set = set()
-    if len(tree) > 2 and tree[2] != default:
-        this_as = 1
-        default = tree[2]
-        this_set = set([default])
-    left_as, left_inas, left_node, left_set = TreeSize(tree[0], default)
-    right_as, right_inas, right_node, right_set = TreeSize(tree[1], default)
-    return (left_as + right_as, this_as + left_inas + right_inas, left_node + right_node + 1, left_set | right_set | this_set)
-
 def EncodeBits(val, minval, bit_sizes):
     val -= minval
     ret = []
@@ -120,41 +104,16 @@ def EncodeBits(val, minval, bit_sizes):
             return ret
     assert(False)
 
-#ASN=dict()
-#MATCH=dict()
-#JUMP=dict()
-#
-#def Optimal(m):
-#    left = sum(v for k,v in m.items())
-#    xlow = min(k for k,v in m.items())
-#    low = xlow
-#    bit_lengths = []
-#    while left > 0:
-#        for bit_length in range(32):
-#            cnt = sum(v for k,v in m.items() if k >= low and k < low + (1 << bit_length))
-#            if cnt * 2 >= left:
-#                bit_lengths += [bit_length]
-#                low += (1 << bit_length)
-#                left -= cnt
-#                break
-#    return (xlow, bit_lengths)
-
 def EncodeType(v):
     return EncodeBits(v, 0, [0, 0, 1])
 
 def EncodeASN(v):
-#    ASN.setdefault(v, 0)
-#    ASN[v] += 1
     return EncodeBits(v, 1, [15, 16, 17, 18, 19, 20, 21, 22, 23, 24])
 
 def EncodeMatch(v):
-#    MATCH.setdefault(v, 0)
-#    MATCH[v] += 1
     return EncodeBits(v, 2, [1, 2, 3, 4, 5, 6, 7, 8])
 
 def EncodeJump(v):
-#    JUMP.setdefault(v, 0)
-#    JUMP[v] += 1
     return EncodeBits(v, 17, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30])
 
 def EncodeBytes(bits):
@@ -170,13 +129,6 @@ def EncodeBytes(bits):
             nbits = 0
     if nbits:
         bytes += [val]
-    return bytes
-
-def DecodeBytes(byts):
-    bits = []
-    for byt in byts:
-        for i in range(8):
-            bits += [(byt >> i) & 1]
     return bytes
 
 def TreeSer(tree, default):
@@ -213,20 +165,11 @@ Parse(entries)
 print("[INFO] Read %i prefixes" % len(entries), file=sys.stderr)
 print("[INFO] Constructing trie", file=sys.stderr)
 tree = BuildTree(entries)
-as_count, inas_count, node_count, as_set = TreeSize(tree)
-print("[INFO] Trie stats: %i inner, %i prefixes (%i leaf), %i distinct AS" % (node_count, as_count + inas_count, as_count, len(as_set)), file=sys.stderr)
 print("[INFO] Compacting tree", file=sys.stderr)
 tree, _ = CompactTree(tree, True)
-as_count, inas_count, node_count, as_set = TreeSize(tree)
-print("[INFO] Trie stats: %i inner, %i prefixes (%i leaf), %i distinct AS" % (node_count, as_count + inas_count, as_count, len(as_set)), file=sys.stderr)
 print("[INFO] Computing inner prefixes", file=sys.stderr)
 tree, _, _ = PropTree(tree, True)
-as_count, inas_count, node_count, as_set = TreeSize(tree)
-print("[INFO] Trie stats: %i inner, %i prefixes (%i leaf), %i distinct AS" % (node_count, as_count + inas_count, as_count, len(as_set)), file=sys.stderr)
 
 ser = TreeSer(tree, None)
 print("[INFO] Total bits: %i" % (len(ser)), file=sys.stderr)
 sys.stdout.buffer.write(bytes(EncodeBytes(ser)))
-#print("[INFO] Optimal MATCH params: %i %r" % Optimal(MATCH), file=sys.stderr)
-#print("[INFO] Optimal JUMP params: %i %r" % Optimal(JUMP), file=sys.stderr)
-#print("[INFO] Optimal ASN params: %i %r" % Optimal(ASN), file=sys.stderr)
