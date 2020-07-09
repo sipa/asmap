@@ -9,3 +9,6 @@ demo.dat.xz: ipv4.dump ipv6.dump birdparse.py
 
 demo.map: demo.dat.xz buildmap.py
 	xz -d <demo.dat.xz | python3 buildmap.py >demo.map
+
+test: demo.map
+	python3 testmap.py

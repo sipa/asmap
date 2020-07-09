@@ -1,4 +1,6 @@
+#!/usr/bin/env python3
 import sys
+import random
 import ipaddress
 
 # Convert a byte array to a bit array
@@ -66,14 +68,64 @@ def Interpret(asmap, num, bits):
         else:
             assert(False)
 
-with open(sys.argv[1], "rb") as f:
-    asmap = DecodeBytes(f.read())
-addr = ipaddress.ip_address(sys.argv[2])
-if isinstance(addr, ipaddress.IPv4Address):
-    num = int.from_bytes(addr.packed, 'big') + 0xffff00000000
-elif isinstance(addr, ipaddress.IPv6Address):
-    num = int.from_bytes(addr.packed, 'big')
 
-ret = Interpret(asmap, num, 128)
-if ret:
-    print("AS%i" % ret)
+
+def decode_ip(ip: str) -> int:
+    addr = ipaddress.ip_address(ip)
+    if isinstance(addr, ipaddress.IPv4Address):
+        return int.from_bytes(addr.packed, 'big') + 0xffff00000000
+    elif isinstance(addr, ipaddress.IPv6Address):
+        return int.from_bytes(addr.packed, 'big')
+
+
+if __name__ == '__main__':
+    no_args = len(sys.argv) == 1
+
+    if no_args:
+        filename = './demo.map'
+    else:
+        filename = sys.argv[1]
+
+    with open(filename, "rb") as f:
+        asmap = DecodeBytes(f.read())
+
+    # If no arguments are passed, run a test on a random selection from
+    # demo.dat.
+    if no_args:
+        expected = [
+            ('8.8.8.8', 15169),
+        ]
+        failed = False
+
+        with open('./demo.random.dat', 'r') as f:
+            for line in f:
+                (ip, asn) = line.split()[:2]
+                ip = ip.split('/')[0]
+
+                assert(asn[:2] == 'AS')
+                asn = int(asn[2:])
+
+                # Make the IP concrete and randomize it somewhat within the
+                # subnet.
+                if ':' not in ip:
+                    ip = '.'.join(ip.split('.')[:3]) + '.{}'.format(
+                        random.randint(0, 16))
+
+                expected.append((ip, asn))
+
+        for ip, asn in expected:
+            got = Interpret(asmap, decode_ip(ip), 128)
+
+            if got != asn:
+                failed = True
+                print("{} failed! Got {}, expected {}".format(
+                    ip, got, asn), file=sys.stderr)
+            else:
+                print("{} passed".format(ip))
+
+        sys.exit(1 if failed else 0)
+
+    else:
+        ret = Interpret(asmap, decode_ip(sys.argv[2]), 128)
+        if ret:
+            print("AS%i" % ret)
