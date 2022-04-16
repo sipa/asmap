@@ -1,5 +1,6 @@
 import sys
 import ipaddress
+import math
 from collections import namedtuple
 
 Entry = namedtuple('Entry', (
@@ -47,7 +48,8 @@ def txtdata_to_entries(txtdata):
             prefix_len += 96
             prefix += 0xffff00000000
 
-        ret.append(Entry(prefix_len, prefix, int(asn[2:])))
+        assert (prefix & ((1 << (128 - prefix_len)) - 1)) == 0
+        ret.append(Entry(prefix_len, prefix >> (128 - prefix_len), int(asn[2:])))
 
     return ret
 
@@ -55,6 +57,7 @@ def entries_to_txtdata(entries):
     """Convert list of entries to text format."""
     ret = []
     for prefix_len, prefix, asn in entries:
+        prefix <<= 128 - prefix_len
         if prefix_len >= 96 and (prefix >> 32) == 0xffff:
             net = ipaddress.IPv4Network((prefix & 0xffffffff, prefix_len - 96), True)
         else:
@@ -70,7 +73,7 @@ def entries_to_txtdata(entries):
 # - [int]: to indicate "this entire range maps has ASN int"
 # - [left,right]: with left and right new nodes
 
-def entries_to_trie(entries, addrlen=128):
+def entries_to_trie(entries):
     """
     Construct a trie format representation of the entries in entries.
     In case entries overlap, the smaller range (larger prefix_len) takes
@@ -78,20 +81,16 @@ def entries_to_trie(entries, addrlen=128):
 
     Args:
         entries: The network prefix -> ASN mappings to encode.
-        addrlen: The maximum number of bits in a network address.
-                 This is 128 for IPv6 (16 bytes).
     Returns:
         The trie.
     """
     trie = []
     for prefix_len, prefix, asn in sorted(entries):
-        assert prefix_len <= addrlen
-        assert (prefix & ((1 << (addrlen - prefix_len)) - 1)) == 0
         node = trie
         # Iterate through each bit in the network prefix, starting with the
         # most significant bit.
         for i in range(prefix_len):
-            bit = (prefix >> (addrlen - 1 - i)) & 1
+            bit = (prefix >> (prefix_len - 1 - i)) & 1
             if len(node) == 0:
                 node += [[], []]
             elif len(node) == 1:
@@ -106,44 +105,40 @@ def entries_to_trie(entries, addrlen=128):
             return
         simplify(node[0])
         simplify(node[1])
-        if len(node[0]) != len(node[1]):
-            return
         if len(node[0]) == 2:
             return
-        if len(node[0]) == 0:
+        if node[0] == node[1]:
+            v = node[0]
             node.clear()
-        elif len(node[1]) == 1:
-            asn = node[1][0]
-            node.clear()
-            node.append(asn)
+            node.append(v)
 
     simplify(trie)
 
     return trie
 
-def trie_to_entries_flat(trie, addrlen, optimize):
+def trie_to_entries_flat(trie, optimize):
     """Convert a trie to a list of Entry objects that do not overlap."""
     def recurse(node, prefix_len, prefix):
         ret = []
         if len(node) == 1:
-            ret = [Entry(prefix_len, prefix << (addrlen - prefix_len), node[0])]
+            ret = [Entry(prefix_len, prefix, node[0])]
         elif len(node) == 2:
             ret = recurse(node[0], prefix_len + 1, prefix << 1)
             ret += recurse(node[1], prefix_len + 1, (prefix << 1) | 1)
             if optimize and len(ret) > 1:
                 asns = set(x.asn for x in ret)
                 if len(asns) == 1:
-                    ret = [Entry(prefix_len, prefix << (addrlen - prefix_len), list(asns)[0])]
+                    ret = [Entry(prefix_len, prefix, list(asns)[0])]
         return ret
     return recurse(trie, 0, 0)
 
-def trie_to_entries_minimal(trie, addrlen, optimize):
+def trie_to_entries_minimal(trie, optimize):
     """Convert a trie to a minimal list of Entry objects, exploiting the overlap rule."""
     def recurse(node, prefix_len, prefix):
         if len(node) == 0:
             return ({None: []}, True)
         elif len(node) == 1:
-            return ({node[0]: [], None: [Entry(prefix_len, prefix << (addrlen - prefix_len), node[0])]}, False)
+            return ({node[0]: [], None: [Entry(prefix_len, prefix, node[0])]}, False)
         else:
             ret = {}
             left, lhole = recurse(node[0], prefix_len + 1, prefix << 1)
@@ -160,7 +155,7 @@ def trie_to_entries_minimal(trie, addrlen, optimize):
             if optimize or not hole:
                 for ctx in ret:
                     if len(ret[ctx]) + 1 < len(ret[None]):
-                        ret[None] = [Entry(prefix_len, prefix << (addrlen - prefix_len), ctx)] + ret[ctx]
+                        ret[None] = [Entry(prefix_len, prefix, ctx)] + ret[ctx]
                 return ({ctx:entries for (ctx, entries) in ret.items() if ctx is None or len(entries) < len(ret[None])}, hole)
             else:
                 return ({None:ret[None]}, hole)
@@ -488,6 +483,51 @@ def trie_to_encoding(trie, optimize):
         return res[-1]
     if None in res:
         return res[None]
+
+PREC = [
+    (0,1), (1,0),
+    (0,2), (2,0),
+    (0,3), (1,2), (2,1), (3,0),
+    (0,4), (1,3), (3,1), (4,0),
+    (0,5), (1,4), (2,3), (3,2),
+    (4,1), (5,0), (0,6), (1,5),
+    (2,4), (4,2), (5,1), (6,0)
+]
+
+def int_to_trie(v):
+    if v == 0:
+        return []
+    if v < 4:
+        return [v]
+    v -= 4
+    if v < len(PREC):
+        a, v = PREC[v]
+    else:
+        a = (math.isqrt(8 * v - 31) - 1) >> 1
+        v -= (a * (a + 1)) >> 1
+    return [int_to_trie(a), int_to_trie(v)]
+
+def trie_depth(trie):
+    if len(trie) < 2:
+        return 1
+    return max(trie_depth(trie[0]), trie_depth(trie[1])) + 1
+
+a = 0
+while True:
+    trie = int_to_trie(a)
+    print(a, trie)
+    a += 1
+    depth = trie_depth(trie)
+    e_flat_unopt = trie_to_entries_flat(trie, False)
+    assert(entries_to_trie(e_flat_unopt) == trie)
+    e_flat_opt = trie_to_entries_flat(trie, True)
+    assert(trie_subsumes(actual=entries_to_trie(e_flat_opt), require=trie))
+    e_min_unopt = trie_to_entries_minimal(trie, False)
+    assert(entries_to_trie(e_min_unopt) == trie)
+    e_min_opt = trie_to_entries_minimal(trie, True)
+    assert(trie_subsumes(actual=entries_to_trie(e_min_opt), require=trie))
+
+exit()
 
 print("Reading file...")
 txtdata = sys.stdin.read()
