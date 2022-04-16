@@ -102,20 +102,20 @@ def entries_to_trie(entries, addrlen=128):
         node.append(asn)
 
     def simplify(node):
-        if len(node) == 0:
-            return ()
-        elif len(node) == 1:
-            return (node[0],)
-        else:
-            lset = simplify(node[0])
-            rset = simplify(node[1])
-            if lset is None or rset is None or lset != rset:
-                return None
+        if len(node) < 2:
+            return
+        simplify(node[0])
+        simplify(node[1])
+        if len(node[0]) != len(node[1]):
+            return
+        if len(node[0]) == 2:
+            return
+        if len(node[0]) == 0:
             node.clear()
-            if lset == ():
-                return lset
-            node.append(lset[0])
-            return lset
+        elif len(node[1]) == 1:
+            asn = node[1][0]
+            node.clear()
+            node.append(asn)
 
     simplify(trie)
 
@@ -137,17 +137,18 @@ def trie_to_entries_flat(trie, addrlen, optimize):
         return ret
     return recurse(trie, 0, 0)
 
-def trie_to_entries_minimal(trie, addrlen):
-    """Convert a trie to a minimal list of Entry objects, exploiting the overlap rule (always optimizes)."""
+def trie_to_entries_minimal(trie, addrlen, optimize):
+    """Convert a trie to a minimal list of Entry objects, exploiting the overlap rule."""
     def recurse(node, prefix_len, prefix):
         if len(node) == 0:
-            return {None: []}
+            return ({None: []}, True)
         elif len(node) == 1:
-            return {node[0]: [], None: [Entry(prefix_len, prefix << (addrlen - prefix_len), node[0])]}
+            return ({node[0]: [], None: [Entry(prefix_len, prefix << (addrlen - prefix_len), node[0])]}, False)
         else:
             ret = {}
-            left = recurse(node[0], prefix_len + 1, prefix << 1)
-            right = recurse(node[1], prefix_len + 1, (prefix << 1) | 1)
+            left, lhole = recurse(node[0], prefix_len + 1, prefix << 1)
+            right, rhole = recurse(node[1], prefix_len + 1, (prefix << 1) | 1)
+            hole = lhole or rhole
             for ctx in set(left) & set(right):
                 ret[ctx] = left[ctx] + right[ctx]
             for ctx in left:
@@ -156,18 +157,21 @@ def trie_to_entries_minimal(trie, addrlen):
             for ctx in right:
                 if ctx not in ret or len(left[None]) + len(right[ctx]) < len(ret[ctx]):
                     ret[ctx] = left[None] + right[ctx]
-            for ctx in ret:
-                if len(ret[ctx]) + 1 < len(ret[None]):
-                    ret[None] = [Entry(prefix_len, prefix << (addrlen - prefix_len), ctx)] + ret[ctx]
-            return {ctx:entries for (ctx, entries) in ret.items() if ctx is None or len(entries) < len(ret[None])}
-    return recurse(trie, 0, 0)[None]
+            if optimize or not hole:
+                for ctx in ret:
+                    if len(ret[ctx]) + 1 < len(ret[None]):
+                        ret[None] = [Entry(prefix_len, prefix << (addrlen - prefix_len), ctx)] + ret[ctx]
+                return ({ctx:entries for (ctx, entries) in ret.items() if ctx is None or len(entries) < len(ret[None])}, hole)
+            else:
+                return ({None:ret[None]}, hole)
+    return recurse(trie, 0, 0)[0][None]
 
 class AsmapInstruction:
     RETURN = 0
     JUMP = 1
     MATCH = 2
     DEFAULT = 3
-
+    END = 4
 
 def encode_bits(val, minval, bit_sizes) -> [int]:
     """
@@ -238,20 +242,10 @@ def encode_asn_size(v):
     return encode_bits_size(v, 1, BIT_SIZES_ASN)
 
 def encode_match(v):
-    ret = []
-    while v >= 2:
-        left = max(0, v.bit_length() - 9)
-        ret += encode_bits(v >> left, 2, BIT_SIZES_MATCH)
-        v = (1 << left) | (v & ((1 << left) - 1))
-    return ret
+    return encode_bits(v, 2, BIT_SIZES_MATCH)
 
 def encode_match_size(v):
-    ret = 0
-    while v >= 2:
-        left = max(0, v.bit_length() - 9)
-        ret += encode_bits_size(v >> left, 2, BIT_SIZES_MATCH)
-        v = (1 << left) | (v & ((1 << left) - 1))
-    return ret
+    return encode_bits_size(v, 2, BIT_SIZES_MATCH)
 
 def encode_jump(v):
     return encode_bits(v, 17, BIT_SIZES_JUMP)
@@ -261,41 +255,123 @@ def encode_jump_size(v):
 
 class AsmapEncoding:
     @staticmethod
-    def predict_bits(ins, arg1=None, arg2=None):
+    def predict_size(ins, arg1=None, arg2=None):
         if ins == AsmapInstruction.RETURN:
             assert isinstance(arg1, int)
             assert arg2 is None
-            return encode_type_bits(ins) + encode_asn_size(arg1)
+            return encode_type_size(ins) + encode_asn_size(arg1)
         elif ins == AsmapInstruction.JUMP:
             assert isinstance(arg1, AsmapEncoding)
             assert isinstance(arg2, AsmapEncoding)
-            return encode_type_bits(ins) + encode_jump_bits(arg1.bits) + arg1.bits + arg2.bits
+            return encode_type_size(ins) + encode_jump_size(arg1.size) + arg1.size + arg2.size
         elif ins == AsmapInstruction.DEFAULT:
             assert isinstance(arg1, int)
             assert isinstance(arg2, AsmapEncoding)
-            return encode_type_bits(ins) + encode_asn_size(arg1) + arg2.bits
+            return encode_type_size(ins) + encode_asn_size(arg1) + arg2.size
         elif ins == AsmapInstruction.MATCH:
             assert isinstance(arg1, int)
             assert isinstance(arg2, AsmapEncoding)
-            return encode_type_bits(ins) + encode_match_size(arg1) + arg2.bits
+            return encode_type_size(ins) + encode_match_size(arg1) + arg2.size
+        elif ins == AsmapInstruction.END:
+            assert arg1 is None
+            assert arg2 is None
+            return 0
         else:
             assert False
 
-    def __init__(self, ins, arg1, arg2):
+    def __init__(self, ins, arg1=None, arg2=None):
         self.ins = ins
         self.arg1 = arg1
         self.arg2 = arg2
-        self.bits = self.predict_bits(ins, arg1, arg2)
+        self.size = self.predict_size(ins, arg1, arg2)
+
+    @staticmethod
+    def make_end():
+        return AsmapEncoding(AsmapInstruction.END)
+
+    @staticmethod
+    def make_leaf(val):
+        assert val is not None
+        return AsmapEncoding(AsmapInstruction.RETURN, val)
+
+    @staticmethod
+    def make_branch(left, right):
+        if left.ins == AsmapInstruction.END and right.ins == AsmapInstruction.END:
+            return left
+        if left.ins == AsmapInstruction.END:
+            if right.ins == AsmapInstruction.MATCH and right.arg1 <= 0xFF:
+                return AsmapEncoding(right.ins, (right.arg1 << 1) | 1, right.arg2)
+            return AsmapEncoding(AsmapInstruction.MATCH, 3, right)
+        if right == AsmapInstruction.END:
+            if left.ins == AsmapInstruction.MATCH and left.arg1 <= 0xFF:
+                return AsmapEncoding(left.ins, left.arg1 << 1, left.arg2)
+            return AsmapEncoding(AsmapInstruction.MATCH, 2, left)
+        return AsmapEncoding(AsmapInstruction.JUMP, left, right)
+
+    @staticmethod
+    def make_default(val, sub):
+        assert val is not None
+        if sub.ins == AsmapInstruction.END:
+            return AsmapEncoding(AsmapInstruction.RETURN, val)
+        if sub.ins == AsmapInstruction.RETURN or sub.ins == AsmapInstruction.DEFAULT:
+            return sub
+        return AsmapEncoding(AsmapInstruction.DEFAULT, val, sub)
 
     def encode(self):
         if self.ins == AsmapInstruction.RETURN:
             return encode_type(self.ins) + encode_asn(self.arg1)
         elif self.ins == AsmapInstruction.JUMP:
-            return encode_type(self.ins) + encode_jump(self.arg1.bits) + self.arg1.encode() + self.arg2.encode()
+            return encode_type(self.ins) + encode_jump(self.arg1.size) + self.arg1.encode() + self.arg2.encode()
         elif self.ins == AsmapInstruction.DEFAULT:
             return encode_type(self.ins) + encode_asn(self.arg1) + self.arg2.encode()
-        elif self.ins = AsmapInstruction.MATCH:
+        elif self.ins == AsmapInstruction.MATCH:
             return encode_type(self.ins) + encode_match(self.arg1) + self.arg2.encode()
+        elif self.ins == AsmapInstruction.END:
+            return []
+
+def trie_to_encoding(trie, optimize):
+    """Convert a trie to asmap encoding."""
+    def recurse(node):
+        if len(node) == 0:
+            return ({(None if optimize else -1): AsmapEncoding.make_end()}, True)
+        elif len(node) == 1:
+            return ({None: AsmapEncoding.make_leaf(node[0]), node[0]: AsmapEncoding.make_end()}, False)
+        else:
+            ret = {}
+            left, lhole = recurse(node[0])
+            right, rhole = recurse(node[1])
+            hole = lhole or rhole
+            for ctx in set(left) & set(right):
+                ret[ctx] = AsmapEncoding.make_branch(left[ctx], right[ctx])
+            if None in left:
+                for ctx in right:
+                    cand = AsmapEncoding.make_branch(left[None], right[ctx])
+                    if ctx not in ret or cand.size < ret[ctx].size:
+                        ret[ctx] = cand
+            if None in right:
+                for ctx in left:
+                    cand = AsmapEncoding.make_branch(left[ctx], right[None])
+                    if ctx not in ret or cand.size < ret[ctx].size:
+                        ret[ctx] = cand
+            if optimize or not hole:
+                gen = ret.get(None, None)
+                for ctx in ret:
+                    if ctx is not None and ctx != -1:
+                        cand = AsmapEncoding.make_default(ctx, ret[ctx])
+                        if gen is None or cand.size < gen.size:
+                            gen = cand
+                if gen is not None:
+                    ret[None] = gen
+                return ({ctx:enc for (ctx,enc) in ret.items() if ctx is None or gen is None or enc.size < gen.size}, hole)
+            else:
+                return ({ctx:enc for (ctx,enc) in ret.items() if ctx is None or ctx == -1}, hole)
+    res, _ = recurse(trie)
+    if -1 in res:
+        return res[-1]
+    if None in res:
+        return res[None]
+
+
 
 print("Reading file...")
 txtdata = sys.stdin.read()
@@ -305,14 +381,28 @@ print("Building trie...")
 trie = entries_to_trie(entries)
 print("Building flat entries list...")
 e_flat_unopt = trie_to_entries_flat(trie, 128, False)
+print(len(e_flat_unopt))
 print("Building optimized flat entries list...")
 e_flat_opt = trie_to_entries_flat(trie, 128, True)
+print(len(e_flat_opt))
+print("Building minimal entries list...")
+e_min_unopt = trie_to_entries_minimal(trie, 128, False)
+print(len(e_min_unopt))
 print("Building optimized minimal entries list...")
-e_min = trie_to_entries_minimal(trie, 128)
+e_min_opt = trie_to_entries_minimal(trie, 128, True)
+print(len(e_min_opt))
+print("Building encoding...")
+enc_unopt = trie_to_encoding(trie, False)
+print(enc_unopt.size)
+print("Building optimized encoding...")
+enc_opt = trie_to_encoding(trie, True)
+print(enc_opt.size)
 
-with open("asmap_unopt.txt", "w") as f:
+with open("asmap_flat_unopt.txt", "w") as f:
     f.write(entries_to_txtdata(e_flat_unopt))
-with open("asmap_opt.txt", "w") as f:
+with open("asmap_flat_opt.txt", "w") as f:
     f.write(entries_to_txtdata(e_flat_opt))
-with open("asmap_min.txt", "w") as f:
-    f.write(entries_to_txtdata(e_min))
+with open("asmap_min_unopt.txt", "w") as f:
+    f.write(entries_to_txtdata(e_min_unopt))
+with open("asmap_min_opt.txt", "w") as f:
+    f.write(entries_to_txtdata(e_min_opt))
