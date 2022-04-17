@@ -110,9 +110,12 @@ def entries_to_trie(entries):
         if len(node[0]) == 2:
             return
         if node[0] == node[1]:
-            v = node[0]
-            node.clear()
-            node.append(v)
+            if len(node[0]) == 0:
+                node.clear()
+            else:
+                v = node[0][0]
+                node.clear()
+                node.append(v)
 
     simplify(trie)
 
@@ -528,27 +531,43 @@ def int_to_trie(v):
         v -= (a * (a + 1)) >> 1
     return [int_to_trie(a), int_to_trie(v)]
 
-a=int(sys.argv[1])
-t=int(sys.argv[2])
-while True:
-    trie = int_to_trie(a)
-    a += t
-    ent_flat_unopt = trie_to_entries_flat(trie, False)
-    assert(entries_to_trie(ent_flat_unopt) == trie)
-    ent_flat_opt = trie_to_entries_flat(trie, True)
-    assert(trie_subsumes(actual=entries_to_trie(ent_flat_opt), require=trie))
-    ent_min_unopt = trie_to_entries_minimal(trie, False)
-    assert(entries_to_trie(ent_min_unopt) == trie)
-    ent_min_opt = trie_to_entries_minimal(trie, True)
-    assert(trie_subsumes(actual=entries_to_trie(ent_min_opt), require=trie))
-    enc_unopt = trie_to_encoding(trie, False)
-    assert(encoding_to_trie(enc_unopt) == trie)
-    enc_opt = trie_to_encoding(trie, True)
-    assert(trie_subsumes(actual=encoding_to_trie(enc_opt), require=trie))
-    if (a % 100000) < t:
-        print(a, enc_unopt.size, enc_opt.size)
+def encode_bytes(bits):
+    """Encode a sequence of bits as a sequence of bytes."""
+    val = 0
+    nbits = 0
+    ret = []
+    for bit in bits:
+        val += (bit << nbits)
+        nbits += 1
+        if nbits == 8:
+            ret.append(val)
+            val = 0
+            nbits = 0
+    if nbits:
+        ret.append(val)
+    return bytes(ret)
 
-exit()
+#a=int(sys.argv[1])
+#t=int(sys.argv[2])
+#while True:
+#    trie = int_to_trie(a)
+#    a += t
+#    ent_flat_unopt = trie_to_entries_flat(trie, False)
+#    assert(entries_to_trie(ent_flat_unopt) == trie)
+#    ent_flat_opt = trie_to_entries_flat(trie, True)
+#    assert(trie_subsumes(actual=entries_to_trie(ent_flat_opt), require=trie))
+#    ent_min_unopt = trie_to_entries_minimal(trie, False)
+#    assert(entries_to_trie(ent_min_unopt) == trie)
+#    ent_min_opt = trie_to_entries_minimal(trie, True)
+#    assert(trie_subsumes(actual=entries_to_trie(ent_min_opt), require=trie))
+#    enc_unopt = trie_to_encoding(trie, False)
+#    assert(encoding_to_trie(enc_unopt) == trie)
+#    enc_opt = trie_to_encoding(trie, True)
+#    assert(trie_subsumes(actual=encoding_to_trie(enc_opt), require=trie))
+#    if (a % 100000) < t:
+#        print(a, enc_unopt.size, enc_opt.size)
+#
+#exit()
 
 print("Reading file...")
 txtdata = sys.stdin.read()
@@ -557,20 +576,20 @@ entries = txtdata_to_entries(txtdata)
 print("Building trie...")
 trie = entries_to_trie(entries)
 print("Building flat entries list...")
-e_flat_unopt = trie_to_entries_flat(trie, 128, False)
+e_flat_unopt = trie_to_entries_flat(trie, False)
 assert(entries_to_trie(e_flat_unopt) == trie)
 print(len(e_flat_unopt))
 print("Building optimized flat entries list...")
-e_flat_opt = trie_to_entries_flat(trie, 128, True)
-#assert(trie_subsumes(actual=entries_to_trie(e_flat_opt), require=trie))
+e_flat_opt = trie_to_entries_flat(trie, True)
+assert(trie_subsumes(actual=entries_to_trie(e_flat_opt), require=trie))
 print(len(e_flat_opt))
 print("Building minimal entries list...")
-e_min_unopt = trie_to_entries_minimal(trie, 128, False)
+e_min_unopt = trie_to_entries_minimal(trie, False)
 assert(entries_to_trie(e_min_unopt) == trie)
 print(len(e_min_unopt))
 print("Building optimized minimal entries list...")
-e_min_opt = trie_to_entries_minimal(trie, 128, True)
-#assert(trie_subsumes(actual=entries_to_trie(e_min_opt), require=trie))
+e_min_opt = trie_to_entries_minimal(trie, True)
+assert(trie_subsumes(actual=entries_to_trie(e_min_opt), require=trie))
 print(len(e_min_opt))
 print("Building encoding...")
 enc_unopt = trie_to_encoding(trie, False)
@@ -589,3 +608,7 @@ with open("asmap_min_unopt.txt", "w") as f:
     f.write(entries_to_txtdata(e_min_unopt))
 with open("asmap_min_opt.txt", "w") as f:
     f.write(entries_to_txtdata(e_min_opt))
+with open("asmap_enc_unopt.txt", "wb") as f:
+    f.write(encode_bytes(enc_unopt.encode()))
+with open("asmap_enc_opt.txt", "wb") as f:
+    f.write(encode_bytes(enc_opt.encode()))
