@@ -1,6 +1,5 @@
 import sys
 import ipaddress
-import math
 from collections import namedtuple
 
 Entry = namedtuple('Entry', (
@@ -92,10 +91,13 @@ def entries_to_trie(entries):
         for i in range(prefix_len):
             bit = (prefix >> (prefix_len - 1 - i)) & 1
             if len(node) == 0:
-                node += [[], []]
+                node.append([])
+                node.append([])
             elif len(node) == 1:
-                node[0] = [node[0]]
-                node.append(node[0])
+                oldasn = node[0]
+                node.clear()
+                node.append([oldasn])
+                node.append([oldasn])
             node = node[bit]
         node.clear()
         node.append(asn)
@@ -136,7 +138,7 @@ def trie_to_entries_minimal(trie, optimize):
     """Convert a trie to a minimal list of Entry objects, exploiting the overlap rule."""
     def recurse(node, prefix_len, prefix):
         if len(node) == 0:
-            return ({None: []}, True)
+            return ({None if optimize else -1: []}, True)
         elif len(node) == 1:
             return ({node[0]: [], None: [Entry(prefix_len, prefix, node[0])]}, False)
         else:
@@ -146,20 +148,30 @@ def trie_to_entries_minimal(trie, optimize):
             hole = lhole or rhole
             for ctx in set(left) & set(right):
                 ret[ctx] = left[ctx] + right[ctx]
-            for ctx in left:
-                if ctx not in ret or len(left[ctx]) + len(right[None]) < len(ret[ctx]):
-                    ret[ctx] = left[ctx] + right[None]
-            for ctx in right:
-                if ctx not in ret or len(left[None]) + len(right[ctx]) < len(ret[ctx]):
-                    ret[ctx] = left[None] + right[ctx]
+            if None in right:
+                for ctx in left:
+                    if ctx not in ret or len(left[ctx]) + len(right[None]) < len(ret[ctx]):
+                        ret[ctx] = left[ctx] + right[None]
+            if None in left:
+                for ctx in right:
+                    if ctx not in ret or len(left[None]) + len(right[ctx]) < len(ret[ctx]):
+                        ret[ctx] = left[None] + right[ctx]
             if optimize or not hole:
+                gen = ret.get(None, None)
                 for ctx in ret:
-                    if len(ret[ctx]) + 1 < len(ret[None]):
-                        ret[None] = [Entry(prefix_len, prefix, ctx)] + ret[ctx]
-                return ({ctx:entries for (ctx, entries) in ret.items() if ctx is None or len(entries) < len(ret[None])}, hole)
+                    if ctx is not None and ctx != -1:
+                        if gen is None or len(ret[ctx]) + 1 < len(gen):
+                            gen = [Entry(prefix_len, prefix, ctx)] + ret[ctx]
+                if gen is not None:
+                    ret[None] = gen
+                ret = {ctx:entries for (ctx, entries) in ret.items() if ctx is None or gen is None or len(entries) < len(gen)}
             else:
-                return ({None:ret[None]}, hole)
-    return recurse(trie, 0, 0)[0][None]
+                ret = {ctx:entries for (ctx, entries) in ret.items() if ctx is None or ctx == -1}
+            return (ret, hole)
+    res, _ = recurse(trie, 0, 0)
+    if -1 in res:
+        return res[-1]
+    return res[None]
 
 def trie_subsumes(actual, require):
     if len(require) == 0:
@@ -494,6 +506,15 @@ PREC = [
     (2,4), (4,2), (5,1), (6,0)
 ]
 
+def isqrt(s):
+    if s == 0: return 0
+    x0 = 1 << (((s.bit_length() - 1) >> 1) + 1)
+    x1 = (x0 + s // x0) >> 1
+    while x1 < x0:
+        x0 = x1
+        x1 = (x0 + s // x0) >> 1
+    return x0
+
 def int_to_trie(v):
     if v == 0:
         return []
@@ -503,29 +524,29 @@ def int_to_trie(v):
     if v < len(PREC):
         a, v = PREC[v]
     else:
-        a = (math.isqrt(8 * v - 31) - 1) >> 1
+        a = (isqrt(8 * v - 31) - 1) >> 1
         v -= (a * (a + 1)) >> 1
     return [int_to_trie(a), int_to_trie(v)]
 
-def trie_depth(trie):
-    if len(trie) < 2:
-        return 1
-    return max(trie_depth(trie[0]), trie_depth(trie[1])) + 1
-
-a = 0
+a=int(sys.argv[1])
+t=int(sys.argv[2])
 while True:
     trie = int_to_trie(a)
-    print(a, trie)
-    a += 1
-    depth = trie_depth(trie)
-    e_flat_unopt = trie_to_entries_flat(trie, False)
-    assert(entries_to_trie(e_flat_unopt) == trie)
-    e_flat_opt = trie_to_entries_flat(trie, True)
-    assert(trie_subsumes(actual=entries_to_trie(e_flat_opt), require=trie))
-    e_min_unopt = trie_to_entries_minimal(trie, False)
-    assert(entries_to_trie(e_min_unopt) == trie)
-    e_min_opt = trie_to_entries_minimal(trie, True)
-    assert(trie_subsumes(actual=entries_to_trie(e_min_opt), require=trie))
+    a += t
+    ent_flat_unopt = trie_to_entries_flat(trie, False)
+    assert(entries_to_trie(ent_flat_unopt) == trie)
+    ent_flat_opt = trie_to_entries_flat(trie, True)
+    assert(trie_subsumes(actual=entries_to_trie(ent_flat_opt), require=trie))
+    ent_min_unopt = trie_to_entries_minimal(trie, False)
+    assert(entries_to_trie(ent_min_unopt) == trie)
+    ent_min_opt = trie_to_entries_minimal(trie, True)
+    assert(trie_subsumes(actual=entries_to_trie(ent_min_opt), require=trie))
+    enc_unopt = trie_to_encoding(trie, False)
+    assert(encoding_to_trie(enc_unopt) == trie)
+    enc_opt = trie_to_encoding(trie, True)
+    assert(trie_subsumes(actual=encoding_to_trie(enc_opt), require=trie))
+    if (a % 100000) < t:
+        print(a, enc_unopt.size, enc_opt.size)
 
 exit()
 
