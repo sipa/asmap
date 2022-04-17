@@ -121,7 +121,7 @@ def entries_to_trie(entries):
 
     return trie
 
-def trie_to_entries_flat(trie, optimize):
+def trie_to_entries_flat(trie, fill=False):
     """Convert a trie to a list of Entry objects that do not overlap."""
     def recurse(node, prefix_len, prefix):
         ret = []
@@ -130,18 +130,18 @@ def trie_to_entries_flat(trie, optimize):
         elif len(node) == 2:
             ret = recurse(node[0], prefix_len + 1, prefix << 1)
             ret += recurse(node[1], prefix_len + 1, (prefix << 1) | 1)
-            if optimize and len(ret) > 1:
+            if fill and len(ret) > 1:
                 asns = set(x.asn for x in ret)
                 if len(asns) == 1:
                     ret = [Entry(prefix_len, prefix, list(asns)[0])]
         return ret
     return recurse(trie, 0, 0)
 
-def trie_to_entries_minimal(trie, optimize):
+def trie_to_entries_minimal(trie, fill=False):
     """Convert a trie to a minimal list of Entry objects, exploiting the overlap rule."""
     def recurse(node, prefix_len, prefix):
         if len(node) == 0:
-            return ({None if optimize else -1: []}, True)
+            return ({None if fill else -1: []}, True)
         elif len(node) == 1:
             return ({node[0]: [], None: [Entry(prefix_len, prefix, node[0])]}, False)
         else:
@@ -159,7 +159,7 @@ def trie_to_entries_minimal(trie, optimize):
                 for ctx in right:
                     if ctx not in ret or len(left[None]) + len(right[ctx]) < len(ret[ctx]):
                         ret[ctx] = left[None] + right[ctx]
-            if optimize or not hole:
+            if fill or not hole:
                 gen = ret.get(None, None)
                 for ctx in ret:
                     if ctx is not None and ctx != -1:
@@ -418,21 +418,8 @@ class AsmapEncoding:
             return sub
         return AsmapEncoding(AsmapInstruction.DEFAULT, val, sub)
 
-    def encode(self):
-        """Construct the actual bit encoding of this program. Returns a list of ints."""
-        if self.ins == AsmapInstruction.RETURN:
-            return encode_type(self.ins) + encode_asn(self.arg1)
-        elif self.ins == AsmapInstruction.JUMP:
-            return encode_type(self.ins) + encode_jump(self.arg1.size) + self.arg1.encode() + self.arg2.encode()
-        elif self.ins == AsmapInstruction.DEFAULT:
-            return encode_type(self.ins) + encode_asn(self.arg1) + self.arg2.encode()
-        elif self.ins == AsmapInstruction.MATCH:
-            return encode_type(self.ins) + encode_match(self.arg1) + self.arg2.encode()
-        elif self.ins == AsmapInstruction.END:
-            return []
 
 def encoding_to_trie(encoding, default=None):
-
     if encoding.ins == AsmapInstruction.END:
         return [] if default is None else [default]
     elif encoding.ins == AsmapInstruction.RETURN:
@@ -456,11 +443,11 @@ def encoding_to_trie(encoding, default=None):
     else:
         assert False
 
-def trie_to_encoding(trie, optimize):
+def trie_to_encoding(trie, fill=False):
     """Convert a trie to asmap encoding."""
     def recurse(node):
         if len(node) == 0:
-            return ({(None if optimize else -1): AsmapEncoding.make_end()}, True)
+            return ({(None if fill else -1): AsmapEncoding.make_end()}, True)
         elif len(node) == 1:
             return ({None: AsmapEncoding.make_leaf(node[0]), node[0]: AsmapEncoding.make_end()}, False)
         else:
@@ -480,7 +467,7 @@ def trie_to_encoding(trie, optimize):
                     cand = AsmapEncoding.make_branch(left[ctx], right[None])
                     if ctx not in ret or cand.size < ret[ctx].size:
                         ret[ctx] = cand
-            if optimize or not hole:
+            if fill or not hole:
                 gen = ret.get(None, None)
                 for ctx in ret:
                     if ctx is not None and ctx != -1:
@@ -499,37 +486,30 @@ def trie_to_encoding(trie, optimize):
     if None in res:
         return res[None]
 
-PREC = [
-    (0,1), (1,0),
-    (0,2), (2,0),
-    (0,3), (1,2), (2,1), (3,0),
-    (0,4), (1,3), (3,1), (4,0),
-    (0,5), (1,4), (2,3), (3,2),
-    (4,1), (5,0), (0,6), (1,5),
-    (2,4), (4,2), (5,1), (6,0)
-]
-
-def isqrt(s):
-    if s == 0: return 0
-    x0 = 1 << (((s.bit_length() - 1) >> 1) + 1)
-    x1 = (x0 + s // x0) >> 1
-    while x1 < x0:
-        x0 = x1
-        x1 = (x0 + s // x0) >> 1
-    return x0
-
-def int_to_trie(v):
+def int_to_trie(v, maxasn):
     if v == 0:
         return []
-    if v < 4:
+    if v <= maxasn:
         return [v]
-    v -= 4
-    if v < len(PREC):
-        a, v = PREC[v]
-    else:
-        a = (isqrt(8 * v - 31) - 1) >> 1
-        v -= (a * (a + 1)) >> 1
-    return [int_to_trie(a), int_to_trie(v)]
+    v -= maxasn + 1
+    def f(s):
+        return ((s*(s+1)) >> 1) - min((s+1) >> 1, maxasn + 1)
+    ls = 1
+    hs = 1
+    while f(hs) <= v:
+        hs <<= 1
+    while hs > ls + 1:
+        ms = (ls + hs) >> 1
+        if f(ms) <= v:
+            ls = ms
+        else:
+            hs = ms
+    a = v - f(ls)
+    b = ls - a
+    if ((ls & 1) == 0) and a >= b and ls < 2 * (maxasn + 1):
+        a += 1
+        b -= 1
+    return [int_to_trie(a, maxasn), int_to_trie(b, maxasn)]
 
 def encode_bytes(bits):
     """Encode a sequence of bits as a sequence of bytes."""
@@ -547,68 +527,90 @@ def encode_bytes(bits):
         ret.append(val)
     return bytes(ret)
 
-#a=int(sys.argv[1])
-#t=int(sys.argv[2])
-#while True:
-#    trie = int_to_trie(a)
-#    a += t
-#    ent_flat_unopt = trie_to_entries_flat(trie, False)
-#    assert(entries_to_trie(ent_flat_unopt) == trie)
-#    ent_flat_opt = trie_to_entries_flat(trie, True)
-#    assert(trie_subsumes(actual=entries_to_trie(ent_flat_opt), require=trie))
-#    ent_min_unopt = trie_to_entries_minimal(trie, False)
-#    assert(entries_to_trie(ent_min_unopt) == trie)
-#    ent_min_opt = trie_to_entries_minimal(trie, True)
-#    assert(trie_subsumes(actual=entries_to_trie(ent_min_opt), require=trie))
-#    enc_unopt = trie_to_encoding(trie, False)
-#    assert(encoding_to_trie(enc_unopt) == trie)
-#    enc_opt = trie_to_encoding(trie, True)
-#    assert(trie_subsumes(actual=encoding_to_trie(enc_opt), require=trie))
-#    if (a % 100000) < t:
-#        print(a, enc_unopt.size, enc_opt.size)
-#
-#exit()
+def decode_bytes(b):
+    """Decode a sequence of bytes into a sequence of bits."""
+    bits = []
+    for byte in b:
+        bits.extend((byte >> i) & 1 for i in range(8))
+    return bits
 
-print("Reading file...")
-txtdata = sys.stdin.read()
-print("Parsing file...")
-entries = txtdata_to_entries(txtdata)
-print("Building trie...")
-trie = entries_to_trie(entries)
-print("Building flat entries list...")
-e_flat_unopt = trie_to_entries_flat(trie, False)
-assert(entries_to_trie(e_flat_unopt) == trie)
-print(len(e_flat_unopt))
-print("Building optimized flat entries list...")
-e_flat_opt = trie_to_entries_flat(trie, True)
-assert(trie_subsumes(actual=entries_to_trie(e_flat_opt), require=trie))
-print(len(e_flat_opt))
-print("Building minimal entries list...")
-e_min_unopt = trie_to_entries_minimal(trie, False)
-assert(entries_to_trie(e_min_unopt) == trie)
-print(len(e_min_unopt))
-print("Building optimized minimal entries list...")
-e_min_opt = trie_to_entries_minimal(trie, True)
-assert(trie_subsumes(actual=entries_to_trie(e_min_opt), require=trie))
-print(len(e_min_opt))
-print("Building encoding...")
-enc_unopt = trie_to_encoding(trie, False)
-assert(encoding_to_trie(enc_unopt) == trie)
-print(enc_unopt.size)
-print("Building optimized encoding...")
-enc_opt = trie_to_encoding(trie, True)
-print(enc_opt.size)
-assert(trie_subsumes(require=trie, actual=encoding_to_trie(enc_opt)))
+def encoding_to_binary(enc):
+    def recurse(node):
+        if node.ins == AsmapInstruction.RETURN:
+            return encode_type(node.ins) + encode_asn(node.arg1)
+        elif node.ins == AsmapInstruction.JUMP:
+            return encode_type(node.ins) + encode_jump(node.arg1.size) + recurse(node.arg1) + recurse(node.arg2)
+        elif node.ins == AsmapInstruction.DEFAULT:
+            return encode_type(node.ins) + encode_asn(node.arg1) + recurse(node.arg2)
+        elif node.ins == AsmapInstruction.MATCH:
+            return encode_type(node.ins) + encode_match(node.arg1) + recurse(node.arg2)
+        else:
+            assert False
+    if enc.ins == AsmapInstruction.END:
+        bits = []
+    else:
+        bits = recurse(enc)
+    return encode_bytes(bits)
 
-with open("asmap_flat_unopt.txt", "w") as f:
-    f.write(entries_to_txtdata(e_flat_unopt))
-with open("asmap_flat_opt.txt", "w") as f:
-    f.write(entries_to_txtdata(e_flat_opt))
-with open("asmap_min_unopt.txt", "w") as f:
-    f.write(entries_to_txtdata(e_min_unopt))
-with open("asmap_min_opt.txt", "w") as f:
-    f.write(entries_to_txtdata(e_min_opt))
-with open("asmap_enc_unopt.txt", "wb") as f:
-    f.write(encode_bytes(enc_unopt.encode()))
-with open("asmap_enc_opt.txt", "wb") as f:
-    f.write(encode_bytes(enc_opt.encode()))
+def binary_to_encoding(b):
+    bits = decode_bytes(b)
+    if len(bits) == 0:
+        return AsmapEncoding(AsmapInstruction.END)
+    def recurse(bitpos):
+        ins, bitpos = decode_type(bits, bitpos)
+        if ins == AsmapInstruction.RETURN:
+            asn, bitpos = decode_asn(bits, bitpos)
+            return AsmapEncoding(ins, asn), bitpos
+        elif ins == AsmapInstruction.JUMP:
+            jump, bitpos = decode_jump(bits, bitpos)
+            left, bitpos1 = recurse(bitpos)
+            assert bitpos1 == bitpos + jump
+            right, bitpos = recurse(bitpos1)
+            return AsmapEncoding(ins, left, right), bitpos
+        elif ins == AsmapInstruction.MATCH:
+            match, bitpos = decode_match(bits, bitpos)
+            sub, bitpos = recurse(bitpos)
+            return AsmapEncoding(ins, match, sub), bitpos
+        elif ins == AsmapInstruction.DEFAULT:
+            asn, bitpos = decode_asn(bits, bitpos)
+            sub, bitpos = recurse(bitpos)
+            return AsmapEncoding(ins, asn, sub), bitpos
+        else:
+            assert False
+    res, bitpos = recurse(0)
+    assert bitpos >= len(bits) - 7
+    return res
+
+m=int(sys.argv[1])
+a=0
+while True:
+    trie = int_to_trie(a, m)
+    a += 1
+    ent_flat = trie_to_entries_flat(trie)
+    ent_flat_txt = entries_to_txtdata(ent_flat)
+    ent_flat_fromtxt = txtdata_to_entries(ent_flat_txt)
+    assert(entries_to_trie(ent_flat_fromtxt) == trie)
+    ent_flat_fill = trie_to_entries_flat(trie, True)
+    ent_flat_fill_txt = entries_to_txtdata(ent_flat_fill)
+    ent_flat_fill_fromtxt = txtdata_to_entries(ent_flat_fill_txt)
+    assert(trie_subsumes(actual=entries_to_trie(ent_flat_fill_fromtxt), require=trie))
+    ent_min = trie_to_entries_minimal(trie, False)
+    ent_min_txt = entries_to_txtdata(ent_min)
+    ent_min_fromtxt = txtdata_to_entries(ent_min_txt)
+    assert(entries_to_trie(ent_min_fromtxt) == trie)
+    ent_min_fill = trie_to_entries_minimal(trie, True)
+    ent_min_fill_txt = entries_to_txtdata(ent_min_fill)
+    ent_min_fill_fromtxt = txtdata_to_entries(ent_min_fill_txt)
+    assert(trie_subsumes(actual=entries_to_trie(ent_min_fill_fromtxt), require=trie))
+    enc = trie_to_encoding(trie, False)
+    enc_bin = encoding_to_binary(enc)
+    enc_frombin = binary_to_encoding(enc_bin)
+    assert(encoding_to_trie(enc_frombin) == trie)
+    enc_fill = trie_to_encoding(trie, True)
+    enc_fill_bin = encoding_to_binary(enc_fill)
+    enc_fill_frombin = binary_to_encoding(enc_fill_bin)
+    assert(trie_subsumes(actual=encoding_to_trie(enc_fill_frombin), require=trie))
+    if (a % 10000) == 0:
+        print("m=%i a=%i: flat=%i min=%i enc=%i" % (m,a,len(ent_flat),len(ent_min),len(enc_bin)))
+
+exit()
