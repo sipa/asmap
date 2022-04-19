@@ -1,17 +1,17 @@
-import sys
 import ipaddress
 import random
 from functools import total_ordering
 
 class ASNEntry:
     """
-    A class representing a (subnet, asn) mapping entry.
+    A class for objects representing a subnet to ASN mapping entry.
 
     ASNEntry objects have a prefix_len, prefix, and asn field. The prefix
     and prefix_len fields together encode the subnet:
     - All IPv4 addresses are implicitly mapped to their corresponding IPv4-mapped
       IPv6 address (in range ::ffff:0:0/96).
-    - The subnet mask is (((1 << prefix_len) - 1) << (128 - prefix_len)).
+    - The subnet mask is (((1 << prefix_len) - 1) << (128 - prefix_len)), or
+      put others: (prefix_len) 1 bits followed by (128 - prefix_len) 0 bits.
     - The network prefix is the IPv6 address corresponding to the big endian
       encoding of (prefix << (128 - prefix_len)).
 
@@ -117,17 +117,18 @@ class _VarLenCoder:
             if v >> bits:
                 # If the value will not fit in class k, subtract its range from v,
                 # emit a "1" bit and continue with the next class.
-                val -= 1 << bits
+                v -= 1 << bits
                 ret.append(1)
             else:
                 if k + 1 < len(self._clsbits):
                     # Unless we're in the last class, emit a "0" bit.
                     ret.append(0)
                 # And then encode v (now the position within the class) in big endian.
-                ret.extend((val >> (bits - 1 - b)) & 1 for b in range(bits))
+                ret.extend((v >> (bits - 1 - b)) & 1 for b in range(bits))
+                return ret
 
         # Couldn't fit val into any of the bit_sizes
-        assert(False)
+        assert False
 
     def encode_size(self, v):
         """Compute how many bits are needed to encode v."""
@@ -136,14 +137,14 @@ class _VarLenCoder:
         ret = 0
         for k, bits in enumerate(self._clsbits):
             if v >> bits:
-                val -= 1 << bits
+                v -= 1 << bits
                 ret += 1
             else:
-                ret += k + 1 < len(self._clsbits)
-                ret += bits
-        return ret
+                ret += (k + 1 < len(self._clsbits)) + bits
+                return ret
+        assert False
 
-    def decode_bits(self, stream, bitpos):
+    def decode(self, stream, bitpos):
         """Decode a number starting at bitpos in stream, returning value and new bitpos."""
         val = self._minval
         for k, bits in enumerate(self._clsbits):
@@ -160,6 +161,121 @@ class _VarLenCoder:
                     val += bit << (bits - 1 - b)
                 return val, bitpos
         assert False
+
+# Variable-length encoders used in the binary asmap format.
+_CODER_INS = _VarLenCoder(0, [0, 0, 1])
+_CODER_ASN = _VarLenCoder(1, list(range(15, 25)))
+_CODER_MATCH = _VarLenCoder(2, list(range(1, 9)))
+_CODER_JUMP = _VarLenCoder(17, list(range(5, 31)))
+
+class _Instruction:
+    """One instruction in the binary asmap format."""
+    # A return instruction, encoded as [0], returns a constant ASN. It is followed by
+    # an integer using the ASN encoding.
+    RETURN = 0
+    # A jump instruction, encoded as [1,0] inspects the next unused bit in the input
+    # and either continues execution (if 0), or skips a specified number of bits (if 1).
+    # It is followed by an integer, and then two subprograms. The integer uses jump encoding
+    # and corresponds to the length of the first subprogram (so it can be skipped).
+    JUMP = 1
+    # A match instruction, encoded as [1,1,0] inspects 1 or more of the next unused bits
+    # in the input with its argument. If they all match, execution continues. If they do
+    # not, failure is returned. If a default instruction has been executed before, instead
+    # of failure the default instruction's argument is returned. It is followed by an
+    # integer in match encoding, and a subprogram. That value is at least 2 bits and at
+    # most 9 bits. An n-bit value signifies matching (n-1) bits in the input with the lower
+    # (n-1) bits in the match value.
+    MATCH = 2
+    # A default instruction, encoded as [1,1,1] sets the default variable to its argument,
+    # and continues execution. It is followed by an integer in ASN encoding, and a subprogram.
+    DEFAULT = 3
+    # Not an actual instruction, but a way to encode the empty program that fails. In the
+    # encoder, it is used more generally to represent the failure case inside MATCH instructions,
+    # which may (if used inside the context of a DEFAULT instruction) actually correspond to
+    # a succesful return. In this usage, they're always converted to an actual MATCH or RETURN
+    # before the top level is reached (see make_default below).
+    END = 4
+
+class _BinNode:
+    """A class representing a (node of) the parsed binary asmap format."""
+
+    def __init__(self, ins, arg1=None, arg2=None):
+        """
+        Construct a new asmap node. Possibilities are:
+        - _BinNode(_Instruction.RETURN, asn)
+        - _BinNode(_Instruction.JUMP, node_0, node_1)
+        - _BinNode(_Instruction.MATCH, val, node)
+        - _BinNode(_Instruction.DEFAULT, asn, node)
+        - _BinNode(_Instruction.END)
+        """
+        self.ins = ins
+        self.arg1 = arg1
+        self.arg2 = arg2
+        if ins == _Instruction.RETURN:
+            assert isinstance(arg1, int)
+            assert arg2 is None
+            self.size = _CODER_INS.encode_size(ins) + _CODER_ASN.encode_size(arg1)
+        elif ins == _Instruction.JUMP:
+            assert isinstance(arg1, _BinNode)
+            assert isinstance(arg2, _BinNode)
+            self.size = _CODER_INS.encode_size(ins) + _CODER_JUMP.encode_size(arg1.size) + arg1.size + arg2.size
+        elif ins == _Instruction.DEFAULT:
+            assert isinstance(arg1, int)
+            assert isinstance(arg2, _BinNode)
+            self.size = _CODER_INS.encode_size(ins) + _CODER_ASN.encode_size(arg1) + arg2.size
+        elif ins == _Instruction.MATCH:
+            assert isinstance(arg1, int)
+            assert isinstance(arg2, _BinNode)
+            self.size = _CODER_INS.encode_size(ins) + _CODER_MATCH.encode_size(arg1) + arg2.size
+        elif ins == _Instruction.END:
+            assert arg1 is None
+            assert arg2 is None
+            self.size = 0
+        else:
+            assert False
+
+    @staticmethod
+    def make_end():
+        """Constructor for a _BinNode with just an END instruction."""
+        return _BinNode(_Instruction.END)
+
+    @staticmethod
+    def make_leaf(val):
+        """Constructor for a _BinNode of just a RETURN instruction."""
+        assert val is not None and val > 0
+        return _BinNode(_Instruction.RETURN, val)
+
+    @staticmethod
+    def make_branch(node0, node1):
+        """
+        Construct a _BinNode corresponding to running either the node0 or node1 subprogram,
+        based on the next input bit. It exploits shortcuts that are possible in the encoding,
+        and uses either a JUMP, MATCH, or END instruction.
+        """
+        if node0.ins == _Instruction.END and node1.ins == _Instruction.END:
+            return node0
+        if node0.ins == _Instruction.END:
+            if node1.ins == _Instruction.MATCH and node1.arg1 <= 0xFF:
+                return _BinNode(node1.ins, node1.arg1 + (1 << node1.arg1.bit_length()), node1.arg2)
+            return _BinNode(_Instruction.MATCH, 3, node1)
+        if node1.ins == _Instruction.END:
+            if node0.ins == _Instruction.MATCH and node0.arg1 <= 0xFF:
+                return _BinNode(node0.ins, node0.arg1 + (1 << (node0.arg1.bit_length() - 1)), node0.arg2)
+            return _BinNode(_Instruction.MATCH, 2, node0)
+        return _BinNode(_Instruction.JUMP, node0, node1)
+
+    @staticmethod
+    def make_default(val, sub):
+        """
+        Construct a _BinNode that corresponds to the specified subprogram, with the specified
+        default value. It exploits shortcuts that are possible in the encoding, and will use
+        either a DEFAULT or a RETURN instruction."""
+        assert val is not None and val > 0
+        if sub.ins == _Instruction.END:
+            return _BinNode(_Instruction.RETURN, val)
+        if sub.ins == _Instruction.RETURN or sub.ins == _Instruction.DEFAULT:
+            return sub
+        return _BinNode(_Instruction.DEFAULT, val, sub)
 
 @total_ordering
 class ASMap:
@@ -256,7 +372,7 @@ class ASMap:
         """Convert a trie to a minimal list of ASNEntry objects, exploiting overlap."""
         def recurse(node, prefix_len, prefix):
             if len(node) == 0:
-                return ({None if fill else -1: []}, True)
+                return ({None if fill else 0: []}, True)
             elif len(node) == 1:
                 return ({node[0]: [], None: [ASNEntry(prefix_len, prefix, node[0])]}, False)
             else:
@@ -277,19 +393,17 @@ class ASMap:
                 if fill or not hole:
                     gen = ret.get(None, None)
                     for ctx in ret:
-                        if ctx is not None and ctx != -1:
+                        if ctx is not None and ctx != 0:
                             if gen is None or len(ret[ctx]) + 1 < len(gen):
                                 gen = [ASNEntry(prefix_len, prefix, ctx)] + ret[ctx]
                     if gen is not None:
                         ret[None] = gen
                     ret = {ctx:entries for (ctx, entries) in ret.items() if ctx is None or gen is None or len(entries) < len(gen)}
                 else:
-                    ret = {ctx:entries for (ctx, entries) in ret.items() if ctx is None or ctx == -1}
+                    ret = {ctx:entries for (ctx, entries) in ret.items() if ctx is None or ctx == 0}
                 return (ret, hole)
         res, _ = recurse(self._trie, 0, 0)
-        if -1 in res:
-            return res[-1]
-        return res[None]
+        return res[0] if 0 in res else res[None]
 
     def __str__(self):
         """Convert this ASMap object to a string containing Python code constructing it."""
@@ -319,7 +433,8 @@ class ASMap:
          - Maximum ASN value (at least 1)
          - Probability for leaf nodes to be unassigned
 
-        This method is mostly intended for testing.
+        The number of leaves in the resulting object may be less than what is
+        requested. This method is mostly intended for testing.
         """
         assert num_leaves >= 1
         assert max_asn >= 1 or unassigned_prob == 1
@@ -343,167 +458,49 @@ class ASMap:
         ret._simplify()
         return ret
 
-    # Variable-length encoders used in the binary asmap format.
-    _CODER_INS = _VarLenCoder(0, [0, 0, 1])
-    _CODER_ASN = _VarLenCoder(1, list(range(15, 25)))
-    _CODER_MATCH = _VarLenCoder(2, list(range(1, 9)))
-    _CODER_JUMP = _VarLenCoder(17, list(range(5, 31)))
-
-    class _Instruction:
-        """One instruction in the binary asmap format."""
-        # A return instruction, encoded as [0], returns a constant ASN. It is followed by
-        # an integer using the ASN encoding.
-        RETURN = 0
-        # A jump instruction, encoded as [1,0] inspects the next unused bit in the input
-        # and either continues execution (if 0), or skips a specified number of bits (if 1).
-        # It is followed by an integer, and then two subprograms. The integer uses jump encoding
-        # and corresponds to the length of the first subprogram (so it can be skipped).
-        JUMP = 1
-        # A match instruction, encoded as [1,1,0] inspects 1 or more of the next unused bits
-        # in the input with its argument. If they all match, execution continues. If they do
-        # not, failure is returned. If a default instruction has been executed before, instead
-        # of failure the default instruction's argument is returned. It is followed by an
-        # integer in match encoding, and a subprogram. That value is at least 2 bits and at
-        # most 9 bits. An n-bit value signifies matching (n-1) bits in the input with the lower
-        # (n-1) bits in the match value.
-        MATCH = 2
-        # A default instruction, encoded as [1,1,1] sets the default variable to its argument,
-        # and continues execution. It is followed by an integer in ASN encoding, and a subprogram.
-        DEFAULT = 3
-        # Not an actual instruction, but a way to encode the empty program that fails. In the
-        # encoder, it is used more generally to represent the failure case inside MATCH instructions,
-        # which may (if used inside the context of a DEFAULT instruction) actually correspond to
-        # a succesful return. In this usage, they're always converted to an actual MATCH or RETURN
-        # before the top level is reached (see make_default below).
-        END = 4
-
-    class _ASMapNode:
-        """A class representing a (node of) the parsed binary asmap format."""
-
-        def __init__(self, ins, arg1=None, arg2=None):
-            """
-            Construct a new asmap node. Possibilities are:
-            - _ASMapNode(_Instruction.RETURN, asn)
-            - _ASMapNode(_Instruction.JUMP, node_0, node_1)
-            - _ASMapNode(_Instruction.MATCH, val, node)
-            - _ASMapNode(_Instruction.DEFAULT, asn, node)
-            - _ASMapNode(_Instruction.END)
-            """
-            self.ins = ins
-            self.arg1 = arg1
-            self.arg2 = arg2
-            if ins == _Instruction.RETURN:
-                assert isinstance(arg1, int)
-                assert arg2 is None
-                self.size = _CODER_INS.encode_size(ins) + _CODER_ASN.encode_size(arg1)
-            elif ins == _Instruction.JUMP:
-                assert isinstance(arg1, _ASMapNode)
-                assert isinstance(arg2, _ASMapNode)
-                self.size = _CODER_INS.encode_size(ins) + _CODER_JUMP.encode_size(arg1.size) + arg1.size + arg2.size
-            elif ins == _Instruction.DEFAULT:
-                assert isinstance(arg1, int)
-                assert isinstance(arg2, _ASMapNode)
-                self.size = _CODER_INS.encode_size(ins) + _CODER_ASN.encode_size(arg1) + arg2.size
-            elif ins == _Instruction.MATCH:
-                assert isinstance(arg1, int)
-                assert isinstance(arg2, _ASMapNode)
-                self.size = _CODER_INS.encode_size(ins) + _CODER_MATCH.encode_size(arg1) + arg2.size
-            elif ins == _Instruction.END:
-                assert arg1 is None
-                assert arg2 is None
-                self.size = 0
-            else:
-                assert False
-
-        @classmethod
-        def make_end(cls):
-            """Constructor for an encoding of just the END instruction."""
-            return cls(cls._Instruction.END)
-
-        @classmethod
-        def make_leaf(cls, val):
-            """Constructor for an encoding of just the RETURN instruction."""
-            assert val is not None and val > 0
-            return cls(cls._Instruction.RETURN, val)
-
-        @classmethod
-        def make_branch(cls, left, right):
-            """
-            Construct a program running the left or right subprogram, based on an input bit.
-            It exploits shortcuts that are possible in the encoding, and use either a JUMP,
-            MATCH, or END instruction."""
-
-            if left.ins == cls._Instruction.END and right.ins == cls._Instruction.END:
-                return left
-            if left.ins == cls._Instruction.END:
-                if right.ins == cls._Instruction.MATCH and right.arg1 <= 0xFF:
-                    return cls(right.ins, right.arg1 + (1 << right.arg1.bit_length()), right.arg2)
-                return cls(cls._Instruction.MATCH, 3, right)
-            if right.ins == cls._Instruction.END:
-                if left.ins == cls._Instruction.MATCH and left.arg1 <= 0xFF:
-                    return cls(left.ins, left.arg1 + (1 << (left.arg1.bit_length() - 1)), left.arg2)
-                return cls(cls._Instruction.MATCH, 2, left)
-            return cls(cls._Instruction.JUMP, left, right)
-
-        @classmethod
-        def make_default(cls, val, sub):
-            """
-            Construct a program running the specified subprogram, with the specified default
-            value. It exploits shortcuts that are possible in the encoding, and will use
-            either a DEFAULT or a RETURN instruction."""
-            assert val is not None and val > 0
-            if sub.ins == _Instruction.END:
-                return cls(_Instruction.RETURN, val)
-            if sub.ins == _Instruction.RETURN or sub.ins == _Instruction.DEFAULT:
-                return sub
-            return cls(_Instruction.DEFAULT, val, sub)
-
-    def _to_encoding(self, fill=False):
-        """Convert a trie to an _ASMapNode object."""
+    def _to_binnode(self, fill=False):
+        """Convert a trie to a _BinNode object."""
         def recurse(node):
             if len(node) == 0:
-                return ({(None if fill else -1): _ASMapNode.make_end()}, True)
+                return ({(None if fill else 0): _BinNode.make_end()}, True)
             elif len(node) == 1:
-                return ({None: self._ASMapNode.make_leaf(node[0]), node[0]: self._ASMapNode.make_end()}, False)
+                return ({None: _BinNode.make_leaf(node[0]), node[0]: _BinNode.make_end()}, False)
             else:
                 ret = {}
                 left, lhole = recurse(node[0])
                 right, rhole = recurse(node[1])
                 hole = lhole or rhole
                 for ctx in set(left) & set(right):
-                    ret[ctx] = _ASMapNode.make_branch(left[ctx], right[ctx])
+                    ret[ctx] = _BinNode.make_branch(left[ctx], right[ctx])
                 if None in left:
                     for ctx in right:
-                        cand = _ASMapNode.make_branch(left[None], right[ctx])
+                        cand = _BinNode.make_branch(left[None], right[ctx])
                         if ctx not in ret or cand.size < ret[ctx].size:
                             ret[ctx] = cand
                 if None in right:
                     for ctx in left:
-                        cand = _ASMapNode.make_branch(left[ctx], right[None])
+                        cand = _BinNode.make_branch(left[ctx], right[None])
                         if ctx not in ret or cand.size < ret[ctx].size:
                             ret[ctx] = cand
                 if fill or not hole:
                     gen = ret.get(None, None)
                     for ctx in ret:
-                        if ctx is not None and ctx != -1:
-                            cand = _ASMapNode.make_default(ctx, ret[ctx])
+                        if ctx is not None and ctx != 0:
+                            cand = _BinNode.make_default(ctx, ret[ctx])
                             if gen is None or cand.size < gen.size:
                                 gen = cand
                     if gen is not None:
                         ret[None] = gen
                     ret = {ctx:enc for (ctx,enc) in ret.items() if ctx is None or gen is None or enc.size < gen.size}
                 else:
-                    ret = {ctx:enc for (ctx,enc) in ret.items() if ctx is None or ctx == -1}
+                    ret = {ctx:enc for (ctx,enc) in ret.items() if ctx is None or ctx == 0}
                 return (ret, hole)
         res, _ = recurse(self._trie)
-        if -1 in res:
-            return res[-1]
-        if None in res:
-            return res[None]
+        return res[0] if 0 in res else res[None]
 
     @staticmethod
-    def _from_encoding(self):
-        """Construct an ASMap object from an _ASMapNode. Internal use only."""
+    def _from_binnode(binnode):
+        """Construct an ASMap object from a _BinNode. Internal use only."""
         def recurse(node, default):
             if node.ins == _Instruction.RETURN:
                 return [node.arg1]
@@ -511,7 +508,7 @@ class ASMap:
                 return [recurse(node.arg1, default), recurse(node.arg2, default)]
             elif node.ins == _Instruction.MATCH:
                 val = node.arg1
-                sub = encoding_to_trie(node.arg2, default)
+                sub = recurse(node.arg2, default)
                 while val >= 2:
                     bit = val & 1
                     val >>= 1
@@ -522,11 +519,11 @@ class ASMap:
                         sub = [sub, fail]
                 return sub
             elif node.ins == _Instruction.DEFAULT:
-                return recurse(encoding.arg2, encoding.arg1)
-        if node.ins == _Instruction.END:
+                return recurse(node.arg2, node.arg1)
+        if binnode.ins == _Instruction.END:
             return ASMap([])
         else:
-            return ASMap(recurse(self._trie, None))
+            return ASMap(recurse(binnode, None))
 
     def to_binary(self, fill=False):
         """
@@ -546,21 +543,21 @@ class ASMap:
             if node.ins == _Instruction.RETURN:
                 _CODER_ASN.encode(node.arg1, bits)
             elif node.ins == _Instruction.JUMP:
-                _CODER_JUMP.encode(node.arg1.size)
+                _CODER_JUMP.encode(node.arg1.size, bits)
                 recurse(node.arg1)
                 recurse(node.arg2)
             elif node.ins == _Instruction.DEFAULT:
-                _CODER_ASN.encode(node.arg1)
+                _CODER_ASN.encode(node.arg1, bits)
                 recurse(node.arg2)
             elif node.ins == _Instruction.MATCH:
-                _CODER_MATCH(node.arg1)
+                _CODER_MATCH.encode(node.arg1, bits)
                 recurse(node.arg2)
             else:
                 assert False
 
-        enc = self._to_encoding(fill)
-        if enc.ins != _Instruction.END:
-            recurse(enc)
+        binnode = self._to_binnode(fill)
+        if binnode.ins != _Instruction.END:
+            recurse(binnode)
 
         val = 0
         nbits = 0
@@ -583,34 +580,36 @@ class ASMap:
         bits = []
         for byte in b:
             bits.extend((byte >> i) & 1 for i in range(8))
-        if len(bits) == 0:
-            return _ASMapNode(_Instruction.END)
 
         def recurse(bitpos):
             ins, bitpos = _CODER_INS.decode(bits, bitpos)
             if ins == _Instruction.RETURN:
                 asn, bitpos = _CODER_ASN.decode(bits, bitpos)
-                return _ASMapNode(ins, asn), bitpos
+                return _BinNode(ins, asn), bitpos
             elif ins == _Instruction.JUMP:
                 jump, bitpos = _CODER_JUMP.decode(bits, bitpos)
                 left, bitpos1 = recurse(bitpos)
                 assert bitpos1 == bitpos + jump
                 right, bitpos = recurse(bitpos1)
-                return _ASMapNode(ins, left, right), bitpos
+                return _BinNode(ins, left, right), bitpos
             elif ins == _Instruction.MATCH:
                 match, bitpos = _CODER_MATCH.decode(bits, bitpos)
                 sub, bitpos = recurse(bitpos)
-                return _ASMapNode(ins, match, sub), bitpos
+                return _BinNode(ins, match, sub), bitpos
             elif ins == _Instruction.DEFAULT:
                 asn, bitpos = _CODER_ASN.decode(bits, bitpos)
                 sub, bitpos = recurse(bitpos)
-                return _ASMapNode(ins, asn, sub), bitpos
+                return _BinNode(ins, asn, sub), bitpos
             else:
                 assert False
 
-        res, bitpos = recurse(0)
-        assert bitpos >= len(bits) - 7
-        return res
+        if len(bits) == 0:
+            binnode = _BinNode(_Instruction.END)
+        else:
+            binnode, bitpos = recurse(0)
+            assert bitpos >= len(bits) - 7
+
+        return ASMap._from_binnode(binnode)
 
     def __lt__(self, other):
         return self._trie < other._trie
@@ -633,10 +632,10 @@ class ASMap:
             return recurse(actual, require[0]) and recurse(actual, require[1])
         return recurse(self._trie, req._trie)
 
-for leaves in range(1, 101):
-    for maxasn in range(1, 16):
-        for prob in [0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.8, 0.9, 0.95, 0.98, 0.99, 1.0]:
-            asmap = ASMap.from_random(num_leaves=leaves, max_asn=maxasn, unassigned_prob=prob)
+for leaves in range(1, 20):
+    for asnbits in range(0, 24):
+        for pct in range(101):
+            asmap = ASMap.from_random(num_leaves=leaves, max_asn=1+(1<<asnbits), unassigned_prob=0.01 * pct)
             for fill in [False, True]:
                 for overlapping in [False, True]:
                     entries = asmap.to_entries(overlapping=overlapping, fill=fill)
