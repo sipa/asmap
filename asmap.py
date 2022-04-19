@@ -8,7 +8,7 @@ import random
 import unittest
 from enum import Enum
 from functools import total_ordering
-from typing import Dict, List, Optional, Tuple, Union, overload
+from typing import Callable, Dict, List, Optional, Tuple, Union, overload
 
 
 class ASNEntry:
@@ -322,7 +322,7 @@ class ASMap:
     @staticmethod
     def _simplify(trie: List) -> None:
         """Simplify this ASMap object by merging identical nodes."""
-        def recurse(node):
+        def recurse(node: List) -> None:
             if len(node) < 2:
                 return
             recurse(node[0])
@@ -374,7 +374,7 @@ class ASMap:
 
     def _to_entries_flat(self, fill: bool = False) -> List[ASNEntry]:
         """Convert an ASMap object to a list of ASNEntry objects whose subnets do not overlap."""
-        def recurse(node, prefix_len, prefix):
+        def recurse(node: List, prefix_len: int, prefix: int):
             ret = []
             if len(node) == 1:
                 ret = [ASNEntry(prefix_len, prefix, node[0])]
@@ -390,7 +390,7 @@ class ASMap:
 
     def _to_entries_minimal(self, fill: bool = False) -> List[ASNEntry]:
         """Convert a trie to a minimal list of ASNEntry objects, exploiting overlap."""
-        def recurse(node, prefix_len, prefix):
+        def recurse(node: List, prefix_len: int, prefix: int):
             if len(node) == 0:
                 return ({None if fill else 0: []}, True)
             if len(node) == 1:
@@ -399,7 +399,8 @@ class ASMap:
             left, lhole = recurse(node[0], prefix_len + 1, prefix << 1)
             right, rhole = recurse(node[1], prefix_len + 1, (prefix << 1) | 1)
             hole = not fill and (lhole or rhole)
-            def candidate(ctx, res0, res1):
+            def candidate(ctx: Optional[int], res0: Optional[List[ASNEntry]],
+                res1: Optional[List[ASNEntry]]):
                 if res0 is not None and res1 is not None:
                     if ctx not in ret or len(res0) + len(res1) < len(ret[ctx]):
                         ret[ctx] = res0 + res1
@@ -482,9 +483,9 @@ class ASMap:
             left, lhole = recurse(node[0])
             right, rhole = recurse(node[1])
             hole = (lhole or rhole) and not fill
-            def candidate(ctx, res0, res1, func):
-                if res0 is not None and res1 is not None:
-                    cand = func(res0, res1)
+            def candidate(ctx: Optional[int], arg1, arg2, func: Callable):
+                if arg1 is not None and arg2 is not None:
+                    cand = func(arg1, arg2)
                     if ctx not in ret or cand.size < ret[ctx].size:
                         ret[ctx] = cand
             for ctx in set(left) | set(right):
@@ -506,7 +507,7 @@ class ASMap:
     @staticmethod
     def _from_binnode(binnode: _BinNode) -> ASMap:
         """Construct an ASMap object from a _BinNode. Internal use only."""
-        def recurse(node: _BinNode, default: int):
+        def recurse(node: _BinNode, default: int) -> List:
             if node.ins == _Instruction.RETURN:
                 return [node.arg1]
             if node.ins == _Instruction.JUMP:
@@ -647,7 +648,7 @@ class ASMap:
 class TestASMap(unittest.TestCase):
     """Unit tests for this module."""
 
-    def test_asmap_roundtrips(self):
+    def test_asmap_roundtrips(self) -> None:
         """Test case that verifies random ASMap objects roundtrip to/from entries/binary."""
         for leaves in range(1, 20):
             for asnbits in range(0, 24):
