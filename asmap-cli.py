@@ -14,7 +14,7 @@ with open(sys.argv[1], "r") as f:
 print("Loading...")
 asmap = ASMap.from_entries(entries)
 print("Compiling...")
-bindata = asmap.to_binary(fill=True)
+bindata = asmap.to_binary(fill=False)
 
 print("Writing...")
 with open(sys.argv[2], "wb") as f:

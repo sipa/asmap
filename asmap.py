@@ -8,77 +8,44 @@ import random
 import unittest
 from enum import Enum
 from functools import total_ordering
-from typing import Callable, Dict, List, Optional, Tuple, Union, overload
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union, overload
 
-
-class ASNEntry:
+def net_to_prefix(net: Union[ipaddress.IPv4Network,ipaddress.IPv6Network]) -> List[bool]:
     """
-    A class for objects representing a subnet to ASN mapping entry.
+    Convert an IPv4 or IPv6 network to a prefix represented as a list of bits.
 
-    ASNEntry objects have a prefix_len, prefix, and asn field. The prefix
-    and prefix_len fields together encode the subnet:
-    - All IPv4 addresses are implicitly mapped to their corresponding IPv4-mapped
-      IPv6 address (in range ::ffff:0:0/96).
-    - The subnet mask is (((1 << prefix_len) - 1) << (128 - prefix_len)), or
-      put others: (prefix_len) 1 bits followed by (128 - prefix_len) 0 bits.
-    - The network prefix is the IPv6 address corresponding to the big endian
-      encoding of (prefix << (128 - prefix_len)).
-
-    Examples:
-    - 127.0.0.1/32:            prefix=0xffff7f000001 prefixlen=128
-    - 192.168.1.0/24:          prefix=0xffffc0a801 prefixlen=120
-    - 0.0.0.0/0:               prefix=0xffff prefixlen=96
-    - ::1/128:                 prefix=0x1 prefixlen=128
-    - 2a01:4f9:c010:19eb::/64: prefix=0x2a0104f9c01019eb prefixlen=64
-
-    The textual representation of ASNEntry objects is of the form
-    "[subnet] AS[asn]", so for example "192.168.1.0/24 AS54321".
+    IPv4 ranges are remapped to their IPv4-mapped IPv6 range (::ffff:0:0/96).
     """
+    num_bits = net.prefixlen
+    netrange = int.from_bytes(net.network_address.packed, 'big')
 
-    def __init__(self, prefix_len: int, prefix: int, asn: int) -> None:
-        """Construct an ASNEntry object directly from prefix_len, prefix, asn."""
-        assert 0 <= prefix_len <= 128
-        assert (prefix >> prefix_len) == 0
-        assert asn > 0
-        self.prefix_len = prefix_len
-        self.prefix = prefix
-        self.asn = asn
+    # Map an IPv4 prefix into IPv6 space.
+    if isinstance(net, ipaddress.IPv4Network):
+        num_bits += 96
+        netrange += 0xffff00000000
 
-    def get_subnet(self) -> Union[ipaddress.IPv4Network,ipaddress.IPv6Network]:
-        """Construct an ipaddress.IPv[46]Network object for the subnet."""
-        value = self.prefix << (128 - self.prefix_len)
-        if self.prefix_len >= 96 and (value >> 32) == 0xffff:
-            return ipaddress.IPv4Network((value & 0xffffffff, self.prefix_len - 96), True)
-        return ipaddress.IPv6Network((value, self.prefix_len), True)
+    # Strip unused bottom bits.
+    assert (netrange & ((1 << (128 - num_bits)) - 1)) == 0
+    netrange >>= 128 - num_bits
 
-    def __str__(self) -> str:
-        """Convert an ASNEntry object to string representation."""
-        return "%s AS%i" % (self.get_subnet(), self.asn)
+    return [(netrange >> (num_bits - 1 - i)) & 1 != 0 for i in range(num_bits)]
 
-    @staticmethod
-    def from_net_asn(net: Union[ipaddress.IPv4Network,ipaddress.IPv6Network], asn: int) -> ASNEntry:
-        """Construct an ASNEntry object from a network object and an ASN."""
-        prefix_len = net.prefixlen
-        prefix = int.from_bytes(net.network_address.packed, 'big')
+def prefix_to_net(prefix: List[bool]) -> Union[ipaddress.IPv4Network,ipaddress.IPv6Network]:
+    """The reverse operation of net_to_prefix."""
+    # Convert to number
+    netrange = sum(b << i for b, i in enumerate(prefix))
+    num_bits = len(prefix)
+    netrange <<= 128 - num_bits
 
-        # Map an IPv4 prefix into IPv6 space.
-        if isinstance(net, ipaddress.IPv4Network):
-            prefix_len += 96
-            prefix += 0xffff00000000
+    # Return IPv4 range if in ::ffff:0:0/96
+    if num_bits >= 96 and (netrange >> 32) == 0xffff:
+        return ipaddress.IPv4Network((netrange & 0xffffffff, num_bits), True)
 
-        assert (prefix & ((1 << (128 - prefix_len)) - 1)) == 0
-        return ASNEntry(prefix_len, prefix >> (128 - prefix_len), asn)
+    # Return IPv6 range otherwise.
+    return ipaddress.IPv6Network((netrange, num_bits), True)
 
-    @staticmethod
-    def from_string(line: str) -> Optional[ASNEntry]:
-        """Construct an ASNEntry object from a string in "[subnet] AS[asn]" format."""
-        line = line.split('#')[0].lstrip(' ').rstrip(' \r\n')
-        prefix, asn = line.split(' ')
-        if len(asn) <= 2 or asn[:2] != "AS":
-            return None
-        net = ipaddress.ip_network(prefix)
-        return ASNEntry.from_net_asn(net, int(asn[2:]))
-
+# Shortcut for (prefix, ASN) entries.
+ASNEntry = Tuple[List[bool], int]
 
 class _VarLenCoder:
     """
@@ -289,7 +256,7 @@ class _BinNode:
         assert val is not None and val > 0
         if sub.ins == _Instruction.END:
             return _BinNode(_Instruction.RETURN, val)
-        if sub.ins == _Instruction.RETURN or sub.ins == _Instruction.DEFAULT:
+        if sub.ins in (_Instruction.RETURN, _Instruction.DEFAULT):
             return sub
         return _BinNode(_Instruction.DEFAULT, val, sub)
 
@@ -303,21 +270,38 @@ class ASMap:
 
     In the trie representation, nodes are represented as bare lists for efficiency
     and ease of manipulation:
-    - [] means an unassigned subnet (no ASN mapping for it is present)
+    - [0] means an unassigned subnet (no ASN mapping for it is present)
     - [int] means a subnet mapped entirely to the specified ASN.
     - [node,node] means a subnet whose lower half and upper half have different
     -             mappings, represented by new trie nodes.
     """
 
-    def __init__(self, trie: List) -> None:
-        """Construct an ASMap object from a trie mapping. Internal use only."""
-        assert isinstance(trie, list)
-        assert len(trie) <= 2
-        self._trie = trie
+    def update(self, prefix: List[bool], asn: int) -> None:
+        """Update this ASMap object to map prefix to the specified asn."""
+        assert asn == 0 or _CODER_ASN.can_encode(asn)
+        def recurse(node: List, offset: int) -> None:
+            if offset == len(prefix):
+                # Reached the end of prefix; overwrite this node.
+                node.clear()
+                node.append(asn)
+                return
+            if len(node) == 1:
+                # Need to descend into a leaf node; split it up.
+                oldasn = node[0]
+                node.clear()
+                node.append([oldasn])
+                node.append([oldasn])
+            # Descend into the node.
+            recurse(node[prefix[offset]], offset + 1)
+            # If the result is two identical leaf children, merge them.
+            if len(node[0]) == 1 and len(node[1]) == 1 and node[0] == node[1]:
+                oldasn = node[0][0]
+                node.clear()
+                node.append(oldasn)
+        recurse(self._trie, 0)
 
-    @staticmethod
-    def _simplify(trie: List) -> None:
-        """Simplify a trie by merging identical nodes."""
+    def _set_trie(self, trie) -> None:
+        """Set trie directly. Internal use only."""
         def recurse(node: List) -> None:
             if len(node) < 2:
                 return
@@ -333,70 +317,62 @@ class ASMap:
                     node.clear()
                     node.append(asn)
         recurse(trie)
+        self._trie = trie
 
-    @staticmethod
-    def from_entries(entries: List[ASNEntry]) -> Optional[ASMap]:
-        """
-        Construct an ASMap object from a list of ASNEntry objects.
-        In case entries overlap, the smaller range (larger prefix_len) takes
-        priority. In case of conflicting mapping with the same prefix and
-        prefix_len, the last one takes priority.
+    def __init__(self, entries: Optional[Iterable[ASNEntry]] = None) -> None:
+        """Construct an ASMap object from an optional list of entries."""
+        self._trie = [0]
+        if entries is not None:
+            def entry_key(entry):
+                """Sort function that places shorter prefixes first."""
+                prefix, asn = entry
+                return len(prefix), prefix, asn
+            for prefix, asn in sorted(entries, key=entry_key):
+                self.update(prefix, asn)
 
-        Args:
-            entries: The ASNEntry objects to convert.
-        Returns:
-            An ASMap object, or None if some values are out of range.
-        """
-        trie: List = []
-        for entry in sorted(entries, key=lambda x: x.prefix_len):
-            if not _CODER_ASN.can_encode(entry.asn):
-                return None
-            node = trie
-            # Iterate through each bit in the network prefix, starting with the
-            # most significant bit.
-            for i in range(entry.prefix_len):
-                bit = (entry.prefix >> (entry.prefix_len - 1 - i)) & 1
-                if len(node) == 0:
-                    node.append([])
-                    node.append([])
-                elif len(node) == 1:
-                    oldasn = node[0]
-                    node.clear()
-                    node.append([oldasn])
-                    node.append([oldasn])
-                node = node[bit]
-            node.clear()
-            node.append(entry.asn)
-        ASMap._simplify(trie)
-        return ASMap(trie)
+    def lookup(self, prefix: List[bool]) -> Optional[int]:
+        """Look up a prefix. Returns ASN, or 0 if unassigned, or None if indeterminate."""
+        node = self._trie
+        for bit in prefix:
+            if len(node) == 1:
+                return node[0]
+            node = node[bit]
+        return None
 
     def _to_entries_flat(self, fill: bool = False) -> List[ASNEntry]:
-        """Convert an ASMap object to a list of ASNEntry objects whose subnets do not overlap."""
-        def recurse(node: List, prefix_len: int, prefix: int) -> List[ASNEntry]:
+        """Convert an ASMap object to a list of non-overlapping (prefix, asn) objects."""
+        prefix : List[bool] = []
+        def recurse(node: List) -> List[ASNEntry]:
             ret = []
             if len(node) == 1:
-                ret = [ASNEntry(prefix_len, prefix, node[0])]
+                ret = [(list(prefix), node[0])]
             elif len(node) == 2:
-                ret = recurse(node[0], prefix_len + 1, prefix << 1)
-                ret += recurse(node[1], prefix_len + 1, (prefix << 1) | 1)
+                prefix.append(False)
+                ret = recurse(node[0])
+                prefix[-1] = True
+                ret += recurse(node[1])
+                prefix.pop()
                 if fill and len(ret) > 1:
-                    asns = set(x.asn for x in ret)
+                    asns = set(x[1] for x in ret)
                     if len(asns) == 1:
-                        ret = [ASNEntry(prefix_len, prefix, list(asns)[0])]
+                        ret = [(list(prefix), list(asns)[0])]
             return ret
-        return recurse(self._trie, 0, 0)
+        return recurse(self._trie)
 
     def _to_entries_minimal(self, fill: bool = False) -> List[ASNEntry]:
         """Convert a trie to a minimal list of ASNEntry objects, exploiting overlap."""
-        def recurse(node: List, prefix_len: int, prefix: int) -> (
-            Tuple[Dict[Optional[int], List[ASNEntry]], bool]):
-            if len(node) == 0:
-                return ({None if fill else 0: []}, True)
+        prefix : List[bool] = []
+        def recurse(node: List) -> (Tuple[Dict[Optional[int], List[ASNEntry]], bool]):
+            if len(node) == 1 and node[0] == 0:
+                return {None if fill else 0: []}, True
             if len(node) == 1:
-                return ({node[0]: [], None: [ASNEntry(prefix_len, prefix, node[0])]}, False)
+                return {node[0]: [], None: [(list(prefix), node[0])]}, False
             ret: Dict[Optional[int], List[ASNEntry]] = {}
-            left, lhole = recurse(node[0], prefix_len + 1, prefix << 1)
-            right, rhole = recurse(node[1], prefix_len + 1, (prefix << 1) | 1)
+            prefix.append(False)
+            left, lhole = recurse(node[0])
+            prefix[-1] = True
+            right, rhole = recurse(node[1])
+            prefix.pop()
             hole = not fill and (lhole or rhole)
             def candidate(ctx: Optional[int], res0: Optional[List[ASNEntry]],
                 res1: Optional[List[ASNEntry]]):
@@ -410,19 +386,19 @@ class ASMap:
             if not hole:
                 for ctx in list(ret):
                     if ctx is not None:
-                        candidate(None, [ASNEntry(prefix_len, prefix, ctx)], ret[ctx])
+                        candidate(None, [(list(prefix), ctx)], ret[ctx])
             if None in ret:
                 ret = {ctx:entries for ctx, entries in ret.items()
                        if ctx is None or len(entries) < len(ret[None])}
             if hole:
                 ret = {ctx:entries for ctx, entries in ret.items() if ctx is None or ctx == 0}
             return ret, hole
-        res, _ = recurse(self._trie, 0, 0)
+        res, _ = recurse(self._trie)
         return res[0] if 0 in res else res[None]
 
     def __str__(self) -> str:
         """Convert this ASMap object to a string containing Python code constructing it."""
-        return "ASMap(%s)" % self._trie
+        return f"ASMap({self._trie})"
 
     def to_entries(self, overlapping: bool = True, fill: bool = False) -> List[ASNEntry]:
         """
@@ -456,6 +432,7 @@ class ASMap:
         assert 0.0 <= unassigned_prob <= 1.0
         trie: List = []
         leaves = [trie]
+        ret = ASMap()
         for i in range(1, num_leaves):
             idx = random.randrange(i)
             leaf = leaves[idx]
@@ -469,14 +446,16 @@ class ASMap:
         for leaf in leaves:
             if random.random() >= unassigned_prob:
                 leaf.append(random.randrange(1, max_asn + 1))
-        ret = ASMap(trie)
-        ASMap._simplify(trie)
+            else:
+                leaf.append(0)
+        #pylint: disable=protected-access
+        ret._set_trie(trie)
         return ret
 
     def _to_binnode(self, fill: bool = False) -> _BinNode:
         """Convert a trie to a _BinNode object."""
         def recurse(node: List) -> Tuple[Dict[Optional[int], _BinNode], bool]:
-            if len(node) == 0:
+            if len(node) == 1 and node[0] == 0:
                 return {(None if fill else 0): _BinNode.make_end()}, True
             if len(node) == 1:
                 return {None: _BinNode.make_leaf(node[0]), node[0]: _BinNode.make_end()}, False
@@ -519,17 +498,18 @@ class ASMap:
                 while val >= 2:
                     bit = val & 1
                     val >>= 1
-                    fail = [] if default == 0 else [default]
                     if bit:
-                        sub = [fail, sub]
+                        sub = [[default], sub]
                     else:
-                        sub = [sub, fail]
+                        sub = [sub, [default]]
                 return sub
             assert node.ins == _Instruction.DEFAULT
             return recurse(node.arg2, node.arg1)
-        if binnode.ins == _Instruction.END:
-            return ASMap([])
-        return ASMap(recurse(binnode, 0))
+        ret = ASMap()
+        if binnode.ins != _Instruction.END:
+            #pylint: disable=protected-access
+            ret._set_trie(recurse(binnode, 0))
+        return ret
 
     def to_binary(self, fill: bool = False) -> bytes:
         """
@@ -633,11 +613,9 @@ class ASMap:
     def extends(self, req: ASMap) -> bool:
         """Determine whether this matches req for all subranges where req is assigned."""
         def recurse(actual: List, require: List) -> bool:
-            if len(require) == 0:
+            if len(require) == 1 and require[0] == 0:
                 return True
             if len(require) == 1:
-                if len(actual) == 0:
-                    return False
                 if len(actual) == 1:
                     return bool(require[0] == actual[0])
                 return recurse(actual[0], require) and recurse(actual[1], require)
@@ -661,23 +639,23 @@ class TestASMap(unittest.TestCase):
                     for overlapping in [False, True]:
                         entries = asmap.to_entries(overlapping=overlapping, fill=False)
                         random.shuffle(entries)
-                        asmap2 = ASMap.from_entries(entries)
+                        asmap2 = ASMap(entries)
                         assert asmap2 is not None
                         self.assertEqual(asmap2, asmap)
                         entries = asmap.to_entries(overlapping=overlapping, fill=True)
                         random.shuffle(entries)
-                        asmap2 = ASMap.from_entries(entries)
+                        asmap2 = ASMap(entries)
                         assert asmap2 is not None
                         self.assertTrue(asmap2.extends(asmap))
 
                     enc = asmap.to_binary(fill=False)
-                    asmap2 = ASMap.from_binary(enc)
-                    assert asmap2 is not None
-                    self.assertEqual(asmap2, asmap)
+                    asmap3 = ASMap.from_binary(enc)
+                    assert asmap3 is not None
+                    self.assertEqual(asmap3, asmap)
                     enc = asmap.to_binary(fill=True)
-                    asmap2 = ASMap.from_binary(enc)
-                    assert asmap2 is not None
-                    self.assertTrue(asmap2.extends(asmap))
+                    asmap3 = ASMap.from_binary(enc)
+                    assert asmap3 is not None
+                    self.assertTrue(asmap3.extends(asmap))
 
 if __name__ == '__main__':
     unittest.main()
