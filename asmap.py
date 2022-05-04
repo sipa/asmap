@@ -26,20 +26,18 @@ def net_to_prefix(net: Union[ipaddress.IPv4Network,ipaddress.IPv6Network]) -> Li
 
     # Strip unused bottom bits.
     assert (netrange & ((1 << (128 - num_bits)) - 1)) == 0
-    netrange >>= 128 - num_bits
-
-    return [(netrange >> (num_bits - 1 - i)) & 1 != 0 for i in range(num_bits)]
+    return [((netrange >> (127 - i)) & 1) != 0 for i in range(num_bits)]
 
 def prefix_to_net(prefix: List[bool]) -> Union[ipaddress.IPv4Network,ipaddress.IPv6Network]:
     """The reverse operation of net_to_prefix."""
     # Convert to number
-    netrange = sum(b << i for b, i in enumerate(prefix))
+    netrange = sum(b << (127 - i) for i, b in enumerate(prefix))
     num_bits = len(prefix)
-    netrange <<= 128 - num_bits
+    assert num_bits <= 128
 
     # Return IPv4 range if in ::ffff:0:0/96
     if num_bits >= 96 and (netrange >> 32) == 0xffff:
-        return ipaddress.IPv4Network((netrange & 0xffffffff, num_bits), True)
+        return ipaddress.IPv4Network((netrange & 0xffffffff, num_bits - 96), True)
 
     # Return IPv6 range otherwise.
     return ipaddress.IPv6Network((netrange, num_bits), True)
@@ -345,7 +343,8 @@ class ASMap:
         def recurse(node: List) -> List[ASNEntry]:
             ret = []
             if len(node) == 1:
-                ret = [(list(prefix), node[0])]
+                if node[0] > 0:
+                    ret = [(list(prefix), node[0])]
             elif len(node) == 2:
                 prefix.append(False)
                 ret = recurse(node[0])
@@ -628,6 +627,30 @@ class ASMap:
 
 class TestASMap(unittest.TestCase):
     """Unit tests for this module."""
+
+    def test_ipv6_prefix_roundtrips(self) -> None:
+        """Test that random IPv6 network ranges roundtrip through prefix encoding."""
+        for _ in range(20):
+            net_bits = random.getrandbits(128)
+            for prefix_len in range(0, 129):
+                masked_bits = (net_bits >> (128 - prefix_len)) << (128 - prefix_len)
+                net = ipaddress.IPv6Network((masked_bits.to_bytes(16, 'big'), prefix_len))
+                prefix = net_to_prefix(net)
+                self.assertTrue(len(prefix) <= 128)
+                net2 = prefix_to_net(prefix)
+                self.assertEqual(net, net2)
+
+    def test_ipv4_prefix_roundtrips(self) -> None:
+        """Test that random IPv4 network ranges roundtrip through prefix encoding."""
+        for _ in range(100):
+            net_bits = random.getrandbits(32)
+            for prefix_len in range(0, 33):
+                masked_bits = (net_bits >> (32 - prefix_len)) << (32 - prefix_len)
+                net = ipaddress.IPv4Network((masked_bits.to_bytes(4, 'big'), prefix_len))
+                prefix = net_to_prefix(net)
+                self.assertTrue(32 <= len(prefix) <= 128)
+                net2 = prefix_to_net(prefix)
+                self.assertEqual(net, net2)
 
     def test_asmap_roundtrips(self) -> None:
         """Test case that verifies random ASMap objects roundtrip to/from entries/binary."""
