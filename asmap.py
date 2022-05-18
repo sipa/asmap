@@ -45,6 +45,9 @@ def prefix_to_net(prefix: List[bool]) -> Union[ipaddress.IPv4Network,ipaddress.I
 # Shortcut for (prefix, ASN) entries.
 ASNEntry = Tuple[List[bool], int]
 
+# Shortcut for (prefix, old ASN, new ASN) entries.
+ASNDiff = Tuple[List[bool], int, int]
+
 class _VarLenCoder:
     """
     A class representing a custom variable-length binary encoder/decoder for
@@ -624,6 +627,29 @@ class ASMap:
         assert isinstance(req, ASMap)
         #pylint: disable=protected-access
         return recurse(self._trie, req._trie)
+
+    def diff(self, other: ASMap) -> List[ASNDiff]:
+        """Compute the diff from self to other."""
+        prefix: List[bool] = []
+        ret: List[ASNDiff] = []
+        def recurse(old_node: List, new_node: List):
+            if len(old_node) == 1 and len(new_node) == 1:
+                if old_node[0] != new_node[0]:
+                    ret.append((prefix, old_node[0], new_node[0]))
+            else:
+                old_left: List = old_node if len(old_node) == 1 else old_node[0]
+                old_right: List = old_node if len(old_node) == 1 else old_node[1]
+                new_left: List = new_node if len(new_node) == 1 else new_node[0]
+                new_right: List = new_node if len(new_node) == 1 else new_node[1]
+                prefix.append(False)
+                recurse(old_left, new_left)
+                prefix[-1] = True
+                recurse(old_right, new_right)
+                prefix.pop()
+        assert isinstance(other, ASMap)
+        #pylint: disable=protected-access
+        recurse(self._trie, other._trie)
+        return ret
 
 class TestASMap(unittest.TestCase):
     """Unit tests for this module."""

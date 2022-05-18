@@ -20,11 +20,15 @@ with open(sys.argv[1], "r") as f:
             print("Line '%s' is not valid" % line)
             exit(1)
         asn = int(s[1][2:])
-        try:
-            net = ipaddress.ip_network(s[0])
-        except ValueError:
-            print("Network '%s' is not valid" % net)
-            exit()
+        if asmap._CODER_ASN.can_encode(asn):
+            try:
+                net = ipaddress.ip_network(s[0])
+            except ValueError:
+                print("Network '%s' is not valid" % net)
+                exit()
+        else:
+            print("Skipping unencodable AS%i" % asn)
+            continue
         prefix = asmap.net_to_prefix(net)
         elems.append((prefix, asn))
 
