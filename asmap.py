@@ -3,6 +3,7 @@ This module provides the ASNEntry and ASMap classes.
 """
 
 from __future__ import annotations
+import copy
 import ipaddress
 import random
 import unittest
@@ -336,8 +337,10 @@ class ASMap:
         node = self._trie
         for bit in prefix:
             if len(node) == 1:
-                return node[0]
+                break
             node = node[bit]
+        if len(node) == 1:
+            return node[0]
         return None
 
     def _to_entries_flat(self, fill: bool = False) -> List[ASNEntry]:
@@ -635,7 +638,7 @@ class ASMap:
         def recurse(old_node: List, new_node: List):
             if len(old_node) == 1 and len(new_node) == 1:
                 if old_node[0] != new_node[0]:
-                    ret.append((prefix, old_node[0], new_node[0]))
+                    ret.append((list(prefix), old_node[0], new_node[0]))
             else:
                 old_left: List = old_node if len(old_node) == 1 else old_node[0]
                 old_right: List = old_node if len(old_node) == 1 else old_node[1]
@@ -650,6 +653,18 @@ class ASMap:
         #pylint: disable=protected-access
         recurse(self._trie, other._trie)
         return ret
+
+    def __copy__(self) -> ASMap:
+        """Construct a copy of this ASMap object. Its state will not be shared."""
+        ret = ASMap()
+        #pylint: disable=protected-access
+        ret._set_trie(copy.deepcopy(self._trie))
+        return ret
+
+    def __deepcopy__(self, _) -> ASMap:
+        # ASMap objects do not allow sharing of the _trie member, so we don't need the memoization.
+        return self.__copy__()
+
 
 class TestASMap(unittest.TestCase):
     """Unit tests for this module."""
@@ -680,11 +695,17 @@ class TestASMap(unittest.TestCase):
 
     def test_asmap_roundtrips(self) -> None:
         """Test case that verifies random ASMap objects roundtrip to/from entries/binary."""
+        # Iterate over the number of leaves the random test ASMap objects have.
         for leaves in range(1, 20):
+            # Iterate over the number of bits in the AS numbers used.
             for asnbits in range(0, 24):
+                # Iterate over the probability that leaves are unassigned.
                 for pct in range(101):
-                    asmap = ASMap.from_random(num_leaves=leaves, max_asn=1+(1<<asnbits),
+                    # Construct a random ASMap object according to the above parameters.
+                    asmap = ASMap.from_random(num_leaves=leaves, max_asn=1 + (1 << asnbits),
                                               unassigned_prob=0.01 * pct)
+                    # Run tests for to_entries and construction from those entries, both
+                    # for overlapping and non-overlapping ones.
                     for overlapping in [False, True]:
                         entries = asmap.to_entries(overlapping=overlapping, fill=False)
                         random.shuffle(entries)
@@ -697,6 +718,7 @@ class TestASMap(unittest.TestCase):
                         assert asmap2 is not None
                         self.assertTrue(asmap2.extends(asmap))
 
+                    # Run tests for to_binary and construction from binary.
                     enc = asmap.to_binary(fill=False)
                     asmap3 = ASMap.from_binary(enc)
                     assert asmap3 is not None
@@ -705,6 +727,73 @@ class TestASMap(unittest.TestCase):
                     asmap3 = ASMap.from_binary(enc)
                     assert asmap3 is not None
                     self.assertTrue(asmap3.extends(asmap))
+
+    def test_patching(self) -> None:
+        """Test behavior of update, lookup, extends, and diff."""
+        #pylint: disable=too-many-locals,too-many-nested-blocks
+        # Iterate over the number of leaves the random test ASMap objects have.
+        for leaves in range(1, 20):
+            # Iterate over the number of bits in the AS numbers used.
+            for asnbits in range(0, 10):
+                # Iterate over the probability that leaves are unassigned.
+                for pct in range(0, 101):
+                    # Construct a random ASMap object according to the above parameters.
+                    asmap = ASMap.from_random(num_leaves=leaves, max_asn=1 + (1 << asnbits),
+                                              unassigned_prob=0.01 * pct)
+                    # Make a copy of that asmap object to which patches will be applied.
+                    # It starts off being equal to asmap.
+                    patched = copy.copy(asmap)
+                    # Keep a list of patches performed.
+                    patches = []
+                    # Initially there cannot be any difference.
+                    self.assertEqual(asmap.diff(patched), [])
+                    # Make 5 patches, each building on top of the previous ones.
+                    for _ in range(0, 5):
+                        # Construct a random path and new ASN to assign it to, apply it to patched,
+                        # and remember it in patches.
+                        pathlen = random.randrange(5)
+                        path = [random.getrandbits(1) != 0 for _ in range(pathlen)]
+                        newasn = random.randrange(1 + (1 << asnbits))
+                        patched.update(path, newasn)
+                        patches = [(path, newasn)] + patches
+
+                        # Compute the diff, and whether asmap extends patched, and the other way
+                        # around.
+                        diff = asmap.diff(patched)
+                        self.assertEqual(asmap == patched, len(diff) == 0)
+                        extends = asmap.extends(patched)
+                        back_extends = patched.extends(asmap)
+                        # Determine whether those extends results are consistent with the diff
+                        # result.
+                        self.assertEqual(extends, all(d[2] == 0 for d in diff))
+                        self.assertEqual(back_extends, all(d[1] == 0 for d in diff))
+                        # For every diff found:
+                        for path, old_asn, new_asn in diff:
+                            # Verify asmap and patched actually differ there.
+                            self.assertTrue(old_asn != new_asn)
+                            self.assertEqual(asmap.lookup(path), old_asn)
+                            self.assertEqual(patched.lookup(path), new_asn)
+                            for _ in range(2):
+                                # Extend the path far enough that it's smaller than any mapped
+                                # range, and check the lookup holds there too.
+                                spec_path = list(path)
+                                while len(spec_path) < 32:
+                                    spec_path.append(random.getrandbits(1) != 0)
+                                self.assertEqual(asmap.lookup(spec_path), old_asn)
+                                self.assertEqual(patched.lookup(spec_path), new_asn)
+                                # Search through the list of performed patches to find the last one
+                                # applying to the extended path (note that patches is in reverse
+                                # order, so the first match should work).
+                                found = False
+                                for patch_path, patch_asn in patches:
+                                    if spec_path[:len(patch_path)] == patch_path:
+                                        # When found, it must match whatever the result was patched
+                                        # to.
+                                        self.assertEqual(new_asn, patch_asn)
+                                        found = True
+                                        break
+                                # And such a patch must exist.
+                                self.assertTrue(found)
 
 if __name__ == '__main__':
     unittest.main()
