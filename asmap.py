@@ -302,6 +302,12 @@ class ASMap:
                 node.append(oldasn)
         recurse(self._trie, 0)
 
+    def update_multi(self, entries: List[Tuple[List[bool], int]]) -> None:
+        """Apply multiple update operations, where longer prefixes take precedence."""
+        entries.sort(key=lambda entry: len(entry[0]))
+        for prefix, asn in entries:
+            self.update(prefix, asn)
+
     def _set_trie(self, trie) -> None:
         """Set trie directly. Internal use only."""
         def recurse(node: List) -> None:
