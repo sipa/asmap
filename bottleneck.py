@@ -6,6 +6,7 @@ import re
 import itertools
 
 LINE_PATTERN = re.compile(r"^TABLE_DUMP2?\|[0-9]+\|B\|[0-9a-f:.]+\|[0-9]+\|([0-9a-f:./]+)\|([0-9, {}]*)\|")
+LINE_AP_PATTERN = re.compile(r"^TABLE_DUMP2_AP\|[0-9]+\|B\|[0-9a-f:.]+\|[0-9]+\|([0-9a-f:./]+)\|(?:[0-9]+)\|([0-9, {}]*)\|")
 SPACE_PATTERN = re.compile(r" +")
 
 def merge_path(ret, net, path, cnt):
@@ -88,6 +89,8 @@ RES = {}
 reports = 0
 for line in sys.stdin:
     match = LINE_PATTERN.match(line)
+    if not match:
+        match = LINE_AP_PATTERN.match(line)
     if match:
         routes += 1
         try:
