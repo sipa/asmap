@@ -281,6 +281,7 @@ class ASMap:
     def update(self, prefix: List[bool], asn: int) -> None:
         """Update this ASMap object to map prefix to the specified asn."""
         assert asn == 0 or _CODER_ASN.can_encode(asn)
+
         def recurse(node: List, offset: int) -> None:
             if offset == len(prefix):
                 # Reached the end of prefix; overwrite this node.
@@ -346,6 +347,7 @@ class ASMap:
     def _to_entries_flat(self, fill: bool = False) -> List[ASNEntry]:
         """Convert an ASMap object to a list of non-overlapping (prefix, asn) objects."""
         prefix : List[bool] = []
+
         def recurse(node: List) -> List[ASNEntry]:
             ret = []
             if len(node) == 1:
@@ -367,6 +369,7 @@ class ASMap:
     def _to_entries_minimal(self, fill: bool = False) -> List[ASNEntry]:
         """Convert a trie to a minimal list of ASNEntry objects, exploiting overlap."""
         prefix : List[bool] = []
+
         def recurse(node: List) -> (Tuple[Dict[Optional[int], List[ASNEntry]], bool]):
             if len(node) == 1 and node[0] == 0:
                 return {None if fill else 0: []}, True
@@ -380,7 +383,7 @@ class ASMap:
             prefix.pop()
             hole = not fill and (lhole or rhole)
             def candidate(ctx: Optional[int], res0: Optional[List[ASNEntry]],
-                res1: Optional[List[ASNEntry]]):
+                    res1: Optional[List[ASNEntry]]):
                 if res0 is not None and res1 is not None:
                     if ctx not in ret or len(res0) + len(res1) < len(ret[ctx]):
                         ret[ctx] = res0 + res1
@@ -468,11 +471,13 @@ class ASMap:
             left, lhole = recurse(node[0])
             right, rhole = recurse(node[1])
             hole = (lhole or rhole) and not fill
+
             def candidate(ctx: Optional[int], arg1, arg2, func: Callable):
                 if arg1 is not None and arg2 is not None:
                     cand = func(arg1, arg2)
                     if ctx not in ret or cand.size < ret[ctx].size:
                         ret[ctx] = cand
+
             for ctx in set(left) | set(right):
                 candidate(ctx, left.get(ctx), right.get(ctx), _BinNode.make_branch)
                 candidate(ctx, left.get(None), right.get(ctx), _BinNode.make_branch)
@@ -527,8 +532,8 @@ class ASMap:
         Returns:
             A bytes object with the encoding of this ASMap object.
         """
-
         bits: List[int] = []
+
         def recurse(node: _BinNode) -> None:
             _CODER_INS.encode(node.ins.value, bits)
             if node.ins == _Instruction.RETURN:
@@ -635,6 +640,7 @@ class ASMap:
         """Compute the diff from self to other."""
         prefix: List[bool] = []
         ret: List[ASNDiff] = []
+
         def recurse(old_node: List, new_node: List):
             if len(old_node) == 1 and len(new_node) == 1:
                 if old_node[0] != new_node[0]:
