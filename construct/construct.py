@@ -64,7 +64,7 @@ FILES = {
     "ripe-26.gz": "https://data.ris.ripe.net/rrc26/%Y.%m/bview.%Y%m%d.0000.gz",
 }
 
-NOW = datetime.datetime.now() - datetime.timedelta(seconds=150000)
+NOW = datetime.datetime.now() - datetime.timedelta(seconds=300000)
 NOWSTR = NOW.strftime("%Y%m%d")
 DIRNAME = "data-%s/" % NOWSTR
 

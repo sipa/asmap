@@ -1,8 +1,11 @@
+# Copyright (c) 2022 Pieter Wuille
+# Distributed under the MIT software license, see the accompanying
+# file LICENSE or http://www.opensource.org/licenses/mit-license.php.
+
 """
 This module provides the ASNEntry and ASMap classes.
 """
 
-from __future__ import annotations
 import copy
 import ipaddress
 import random
@@ -177,9 +180,9 @@ class _BinNode:
     @overload
     def __init__(self, ins: _Instruction, arg1: int): ...
     @overload
-    def __init__(self, ins: _Instruction, arg1: _BinNode, arg2: _BinNode): ...
+    def __init__(self, ins: _Instruction, arg1: "_BinNode", arg2: "_BinNode"): ...
     @overload
-    def __init__(self, ins: _Instruction, arg1: int, arg2: _BinNode): ...
+    def __init__(self, ins: _Instruction, arg1: int, arg2: "_BinNode"): ...
 
     def __init__(self, ins: _Instruction, arg1=None, arg2=None):
         """
@@ -219,18 +222,18 @@ class _BinNode:
             assert False
 
     @staticmethod
-    def make_end() -> _BinNode:
+    def make_end() -> "_BinNode":
         """Constructor for a _BinNode with just an END instruction."""
         return _BinNode(_Instruction.END)
 
     @staticmethod
-    def make_leaf(val: int) -> _BinNode:
+    def make_leaf(val: int) -> "_BinNode":
         """Constructor for a _BinNode of just a RETURN instruction."""
         assert val is not None and val > 0
         return _BinNode(_Instruction.RETURN, val)
 
     @staticmethod
-    def make_branch(node0: _BinNode, node1: _BinNode) -> _BinNode:
+    def make_branch(node0: "_BinNode", node1: "_BinNode") -> "_BinNode":
         """
         Construct a _BinNode corresponding to running either the node0 or node1 subprogram,
         based on the next input bit. It exploits shortcuts that are possible in the encoding,
@@ -250,7 +253,7 @@ class _BinNode:
         return _BinNode(_Instruction.JUMP, node0, node1)
 
     @staticmethod
-    def make_default(val: int, sub: _BinNode) -> _BinNode:
+    def make_default(val: int, sub: "_BinNode") -> "_BinNode":
         """
         Construct a _BinNode that corresponds to the specified subprogram, with the specified
         default value. It exploits shortcuts that are possible in the encoding, and will use
@@ -427,7 +430,8 @@ class ASMap:
         return self._to_entries_flat(fill)
 
     @staticmethod
-    def from_random(num_leaves: int = 10, max_asn: int = 6, unassigned_prob: float = 0.5) -> ASMap:
+    def from_random(num_leaves: int = 10, max_asn: int = 6,
+                    unassigned_prob: float = 0.5) -> "ASMap":
         """
         Construct a random ASMap object, with specified:
          - Number of leaves in its trie (at least 1)
@@ -496,7 +500,7 @@ class ASMap:
         return res[0] if 0 in res else res[None]
 
     @staticmethod
-    def _from_binnode(binnode: _BinNode) -> ASMap:
+    def _from_binnode(binnode: _BinNode) -> "ASMap":
         """Construct an ASMap object from a _BinNode. Internal use only."""
         def recurse(node: _BinNode, default: int) -> List:
             if node.ins == _Instruction.RETURN:
@@ -570,7 +574,7 @@ class ASMap:
         return bytes(ret)
 
     @staticmethod
-    def from_binary(bindata: bytes) -> Optional[ASMap]:
+    def from_binary(bindata: bytes) -> Optional["ASMap"]:
         """Decode an ASMap object from the provided binary encoding."""
 
         bits: List[int] = []
@@ -613,7 +617,7 @@ class ASMap:
 
         return ASMap._from_binnode(binnode)
 
-    def __lt__(self, other: ASMap) -> bool:
+    def __lt__(self, other: "ASMap") -> bool:
         return self._trie < other._trie
 
     def __eq__(self, other: object) -> bool:
@@ -621,7 +625,7 @@ class ASMap:
             return self._trie == other._trie
         return False
 
-    def extends(self, req: ASMap) -> bool:
+    def extends(self, req: "ASMap") -> bool:
         """Determine whether this matches req for all subranges where req is assigned."""
         def recurse(actual: List, require: List) -> bool:
             if len(require) == 1 and require[0] == 0:
@@ -637,7 +641,7 @@ class ASMap:
         #pylint: disable=protected-access
         return recurse(self._trie, req._trie)
 
-    def diff(self, other: ASMap) -> List[ASNDiff]:
+    def diff(self, other: "ASMap") -> List[ASNDiff]:
         """Compute the diff from self to other."""
         prefix: List[bool] = []
         ret: List[ASNDiff] = []
@@ -660,14 +664,14 @@ class ASMap:
         recurse(self._trie, other._trie)
         return ret
 
-    def __copy__(self) -> ASMap:
+    def __copy__(self) -> "ASMap":
         """Construct a copy of this ASMap object. Its state will not be shared."""
         ret = ASMap()
         #pylint: disable=protected-access
         ret._set_trie(copy.deepcopy(self._trie))
         return ret
 
-    def __deepcopy__(self, _) -> ASMap:
+    def __deepcopy__(self, _) -> "ASMap":
         # ASMap objects do not allow sharing of the _trie member, so we don't need the memoization.
         return self.__copy__()
 
@@ -750,7 +754,7 @@ class TestASMap(unittest.TestCase):
                     # It starts off being equal to asmap.
                     patched = copy.copy(asmap)
                     # Keep a list of patches performed.
-                    patches = []
+                    patches: List[ASNEntry] = []
                     # Initially there cannot be any difference.
                     self.assertEqual(asmap.diff(patched), [])
                     # Make 5 patches, each building on top of the previous ones.
