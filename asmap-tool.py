@@ -145,7 +145,15 @@ def main():
                 print("%s AS%i # was unassigned" % (net, new_asn))
             else:
                 print("%s AS%i # was AS%i" % (net, new_asn, old_asn))
-        print("# %i (2^%f) IPv4 addresses changed; %i (2^%f) IPv6 addresses changed" % (ipv4_changed, math.log2(ipv4_changed), ipv6_changed, math.log2(ipv6_changed)))
+        print(
+            "# %i%s IPv4 addresses changed; %i%s IPv6 addresses changed"
+            % (
+                ipv4_changed,
+                "" if ipv4_changed == 0 else " (2^%.2f)" % math.log2(ipv4_changed),
+                ipv6_changed,
+                "" if ipv6_changed == 0 else " (2^%.2f)" % math.log2(ipv6_changed),
+            )
+        )
     else:
         parser.print_help()
         sys.exit("No command provided.")
